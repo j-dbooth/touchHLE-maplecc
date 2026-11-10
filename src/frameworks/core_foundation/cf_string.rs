@@ -53,6 +53,22 @@ fn CFStringAppendCString(
     msg![env; string appendString:to_append]
 }
 
+fn CFStringAppendCharacters(
+    env: &mut Environment,
+    the_string: CFMutableStringRef,
+    chars: ConstPtr<unichar>,
+    num_chars: CFIndex,
+) {
+    let mut u16_vec = Vec::with_capacity(num_chars as usize);
+    for i in 0..num_chars {
+        u16_vec.push(env.mem.read(chars + (i as u32)));
+    }
+    let rust_string = String::from_utf16_lossy(&u16_vec);
+    let ns_str = ns_string::from_rust_string(env, rust_string);
+    msg![env; the_string appendString:ns_str]
+}
+
+
 fn CFStringAppendFormat(
     env: &mut Environment,
     string: CFMutableStringRef,
@@ -446,6 +462,7 @@ fn CFStringNormalize(
 
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CFStringAppend(_, _)),
+    export_c_func!(CFStringAppendCharacters(_, _, _)),
     export_c_func!(CFStringAppendCString(_, _, _)),
     export_c_func!(CFStringAppendFormat(_, _, _, _)),
     export_c_func!(CFStringConvertEncodingToNSStringEncoding(_)),

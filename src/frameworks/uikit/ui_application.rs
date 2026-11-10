@@ -7,6 +7,7 @@
 
 use super::ui_device::*;
 use crate::dyld::{export_c_func, ConstantExports, FunctionExports, HostConstant};
+use crate::frameworks::core_graphics::{CGPoint, CGRect, CGSize};
 use crate::frameworks::foundation::ns_string::{from_rust_string, get_static_str};
 use crate::frameworks::foundation::{ns_array, ns_string, NSInteger, NSUInteger};
 use crate::mem::MutPtr;
@@ -95,6 +96,26 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (bool)isStatusBarHidden {
     env.framework_state.uikit.ui_application.status_bar_hidden
+}
+- (CGRect)statusBarFrame {
+    if env.framework_state.uikit.ui_application.status_bar_hidden {
+        <CGRect as Default>::default()
+    } else {
+        match msg![env; this statusBarOrientation] {
+            UIDeviceOrientationPortrait | UIDeviceOrientationPortraitUpsideDown => {
+                CGRect {
+                    origin: CGPoint { x: 0.0, y: 0.0 },
+                    size: CGSize { width: 320.0, height: 20.0 },
+                }
+            }
+            _ => {
+                CGRect {
+                    origin: CGPoint { x: 0.0, y: 0.0 },
+                    size: CGSize { width: 20.0, height: 480.0 },
+                }
+            }
+        }
+    }
 }
 - (())setStatusBarHidden:(bool)hidden {
     env.framework_state.uikit.ui_application.status_bar_hidden = hidden;

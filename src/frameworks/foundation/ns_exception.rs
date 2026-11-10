@@ -6,7 +6,91 @@
 
 use crate::dyld::{ConstantExports, FunctionExports, HostConstant};
 use crate::mem::MutVoidPtr;
+use crate::objc::{
+    autorelease, id, msg, nil, objc_classes, release, retain, ClassExports, HostObject, NSZonePtr,
+};
 use crate::{export_c_func, Environment};
+
+struct NSExceptionHostObject {
+    name: id,
+    reason: id,
+    user_info: id,
+}
+impl HostObject for NSExceptionHostObject {}
+
+pub const CLASSES: ClassExports = objc_classes! {
+
+(env, this, _cmd);
+
+@implementation NSException: NSObject
+
++ (id)allocWithZone:(NSZonePtr)_zone {
+    let host_object = Box::new(NSExceptionHostObject {
+        name: nil,
+        reason: nil,
+        user_info: nil,
+    });
+    env.objc.alloc_object(this, host_object, &mut env.mem)
+}
+
++ (id)exceptionWithName:(id)name reason:(id)reason userInfo:(id)userInfo {
+    let new: id = msg![env; this alloc];
+    let new: id = msg![env; new initWithName:name reason:reason userInfo:userInfo];
+    autorelease(env, new)
+}
+
++ (())raise:(id)name format:(id)format {
+    let name_str = if name != nil { super::ns_string::to_rust_string(env, name).to_string() } else { "Unknown".to_string() };
+    let format_str = if format != nil { super::ns_string::to_rust_string(env, format).to_string() } else { "".to_string() };
+    log!("Warning: [NSException raise:{} format:{}]", name_str, format_str);
+}
+
+- (id)initWithName:(id)name reason:(id)reason userInfo:(id)userInfo {
+    retain(env, name);
+    retain(env, reason);
+    retain(env, userInfo);
+    let host = env.objc.borrow_mut::<NSExceptionHostObject>(this);
+    host.name = name;
+    host.reason = reason;
+    host.user_info = userInfo;
+    this
+}
+
+- (id)name {
+    env.objc.borrow::<NSExceptionHostObject>(this).name
+}
+
+- (id)reason {
+    env.objc.borrow::<NSExceptionHostObject>(this).reason
+}
+
+- (id)userInfo {
+    env.objc.borrow::<NSExceptionHostObject>(this).user_info
+}
+
+- (())raise {
+    let name_str = {
+        let n = env.objc.borrow::<NSExceptionHostObject>(this).name;
+        if n != nil { super::ns_string::to_rust_string(env, n).to_string() } else { "Unknown".to_string() }
+    };
+    let reason_str = {
+        let r = env.objc.borrow::<NSExceptionHostObject>(this).reason;
+        if r != nil { super::ns_string::to_rust_string(env, r).to_string() } else { "Unknown".to_string() }
+    };
+    log!("Warning: NSException raised: [{}] {}", name_str, reason_str);
+}
+
+- (())dealloc {
+    let &NSExceptionHostObject { name, reason, user_info } = env.objc.borrow(this);
+    release(env, name);
+    release(env, reason);
+    release(env, user_info);
+    env.objc.dealloc_object(this, &mut env.mem);
+}
+
+@end
+
+};
 
 // All constants are NSExceptionName
 pub const CONSTANTS: ConstantExports = &[

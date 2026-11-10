@@ -217,6 +217,17 @@ pub const CLASSES: ClassExports = objc_classes! {
     todo_objc_setter!(this, enables);
 }
 
+- (f32)minimumFontSize {
+    0.0
+}
+
+- (())setAdjustsFontSizeToFitWidth:(bool)adjusts {
+    todo_objc_setter!(this, adjusts);
+}
+- (bool)adjustsFontSizeToFitWidth {
+    false
+}
+
 - (())touchesBegan:(id)_touches // NSSet* of UITouch*
          withEvent:(id)_event { // UIEvent*
     let _: bool = msg![env; this becomeFirstResponder];

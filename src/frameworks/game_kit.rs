@@ -10,6 +10,7 @@
 //! a `respondsToSelector:` call to some objects of this framework.
 //! Thus, we need to provide some stubs in order to not crash on that call.
 
+mod gk_achievement;
 mod gk_leaderboard;
 mod gk_local_player;
 mod gk_score;
@@ -18,6 +19,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
     path: "/System/Library/Frameworks/GameKit.framework/GameKit",
     aliases: &[],
     class_exports: &[
+        gk_achievement::CLASSES,
         gk_leaderboard::CLASSES,
         gk_local_player::CLASSES,
         gk_score::CLASSES,
@@ -25,3 +27,8 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
     constant_exports: &[gk_local_player::CONSTANTS],
     function_exports: &[],
 };
+
+#[derive(Default)]
+pub struct State {
+    pub local_player: crate::objc::id,
+}

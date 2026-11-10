@@ -561,6 +561,29 @@ pub const CLASSES: ClassExports = objc_classes! {
     NSRange { location: NSNotFound as NSUInteger, length: 0 }
 }
 
+- (NSRange)rangeOfCharacterFromSet:(id)set
+                           options:(NSUInteger)_options {
+    let length: NSUInteger = msg![env; this length];
+    msg![env; this rangeOfCharacterFromSet:set options:_options range:(NSRange { location: 0, length })]
+}
+
+- (NSRange)rangeOfCharacterFromSet:(id)set
+                           options:(NSUInteger)_options
+                             range:(NSRange)range {
+    let length: NSUInteger = msg![env; this length];
+    let start = range.location.min(length);
+    let end = (range.location + range.length).min(length);
+    let mut idx = start;
+    while idx < end {
+        let c: u16 = msg![env; this characterAtIndex:idx];
+        if msg![env; set characterIsMember:c] {
+            return NSRange { location: idx, length: 1 };
+        }
+        idx += 1;
+    }
+    NSRange { location: NSNotFound as NSUInteger, length: 0 }
+}
+
 - (id)description {
     this
 }
@@ -1350,7 +1373,6 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 - (())encodeWithCoder:(id)coder {
     let string = to_rust_string(env, this);
-    assert!(string.as_bytes().iter().all(|byte| byte.is_ascii())); // TODO
 
     // TODO: use some kind of substitution instead?
     // See "Making Substitutions During Coding" in the doc https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/Archiving/Articles/codingobjects.html

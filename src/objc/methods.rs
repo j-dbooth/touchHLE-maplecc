@@ -32,7 +32,7 @@ impl Clone for IMP {
     fn clone(&self) -> Self {
         match self {
             IMP::Guest(guest_imp) => IMP::Guest(*guest_imp),
-            IMP::Host(_) => unimplemented!(),
+            IMP::Host(host_imp) => IMP::Host(*host_imp),
         }
     }
 }
@@ -40,7 +40,7 @@ impl std::fmt::Debug for IMP {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IMP::Guest(guest_imp) => write!(f, "guest method IMP at {:?}", guest_imp),
-            IMP::Host(_) => unimplemented!(),
+            IMP::Host(_) => write!(f, "host method IMP"),
         }
     }
 }
@@ -302,6 +302,7 @@ impl ObjC {
         }
     }
 
+    #[allow(dead_code)]
     pub fn debug_all_class_selectors_as_strings(&self, mem: &Mem, class: Class) -> Vec<String> {
         let mut class = class;
         let mut selector_strings = Vec::new();

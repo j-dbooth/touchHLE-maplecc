@@ -19,6 +19,7 @@ use crate::objc::{
     autorelease, id, msg, msg_class, nil, objc_classes, release, retain, ClassExports, HostObject,
     NSZonePtr,
 };
+use crate::dyld::{export_c_func, FunctionExports};
 use crate::Environment;
 use std::collections::HashMap;
 
@@ -63,9 +64,42 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 + (id)imageNamed:(id)name { // NSString*
     // TODO: figure out whether this is actually correct in all cases
-    let bundle: id = msg_class![env; NSBundle mainBundle];
-    let path: id = msg![env; bundle pathForResource:name ofType:nil];
     let name_str = ns_string::to_rust_string(env, name).to_string();
+    if let Some(&cached) = State::get(env).cached_images.get(&name_str) {
+        return cached;
+    }
+
+    let bundle: id = msg_class![env; NSBundle mainBundle];
+    let mut path: id = msg![env; bundle pathForResource:name ofType:nil];
+    if path == nil {
+        let candidates = if !name_str.contains('.') {
+            vec![
+                format!("{}.png", name_str),
+                format!("{}@2x.png", name_str),
+                format!("{}.PNG", name_str),
+                format!("{}@2x.PNG", name_str),
+                format!("{}.jpg", name_str),
+                format!("{}@2x.jpg", name_str),
+                format!("{}.jpeg", name_str),
+            ]
+        } else if let Some((stem, ext)) = name_str.rsplit_once('.') {
+            vec![
+                format!("{}@2x.{}", stem, ext),
+            ]
+        } else {
+            Vec::new()
+        };
+
+        for candidate in candidates {
+            let cand_ns = ns_string::from_rust_string(env, candidate);
+            path = msg![env; bundle pathForResource:cand_ns ofType:nil];
+            release(env, cand_ns);
+            if path != nil {
+                break;
+            }
+        }
+    }
+
     if path == nil {
         log!("Warning: [UIImage imageNamed:{:?}] => nil", name_str);
         return nil;
@@ -78,12 +112,12 @@ pub const CLASSES: ClassExports = objc_classes! {
             release(env, img);
         }
     }
-    if !State::get(env).cached_images.contains_key(&name_str) {
-        let img = msg![env; this imageWithContentsOfFile:path];
+    let img = msg![env; this imageWithContentsOfFile:path];
+    if img != nil {
         retain(env, img);
         State::get_mut(env).cached_images.insert(name_str.clone(), img);
     }
-    *State::get(env).cached_images.get(&name_str).unwrap()
+    img
 }
 
 + (id)imageWithContentsOfFile:(id)path { // NSString*
@@ -117,14 +151,18 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
     let path = ns_string::to_rust_string(env, path); // TODO: avoid copy
     let Ok(bytes) = env.fs.read(GuestPath::new(&path)) else {
-        log!("Warning: couldn't read image file at {:?}, returning nil", path);
+        log_dbg!("Warning: couldn't read image file at {:?}, returning nil", path);
         release(env, this);
         return nil;
     };
-    // TODO: Real error handling. For now, most errors are likely to be caused
-    //       by a functionality gap in touchHLE, not the app actually trying to
-    //       load a broken file, so panicking is most useful.
-    let image = Image::from_bytes(&bytes).unwrap();
+    let image = match Image::from_bytes(&bytes) {
+        Ok(image) => image,
+        Err(e) => {
+            log!("Warning: couldn't decode image {:?}: {}, returning nil", path, e);
+            release(env, this);
+            return nil;
+        }
+    };
     let cg_image = cg_image::from_image(env, image);
     env.objc.borrow_mut::<UIImageHostObject>(this).cg_image = cg_image;
     this
@@ -132,8 +170,14 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (id)initWithData:(id)data { // NSData*
     let slice = ns_data::to_rust_slice(env, data);
-    // TODO: refactor common parts
-    let image = Image::from_bytes(slice).unwrap();
+    let image = match Image::from_bytes(slice) {
+        Ok(image) => image,
+        Err(e) => {
+            log!("Warning: [UIImage initWithData:] couldn't decode image (len={}): {}, returning nil", slice.len(), e);
+            release(env, this);
+            return nil;
+        }
+    };
     let cg_image = cg_image::from_image(env, image);
     env.objc.borrow_mut::<UIImageHostObject>(this).cg_image = cg_image;
     this
@@ -217,3 +261,28 @@ pub const CLASSES: ClassExports = objc_classes! {
 @end
 
 };
+
+pub fn UIImagePNGRepresentation(env: &mut Environment, image: id) -> id {
+    if image == nil {
+        return nil;
+    }
+    let &UIImageHostObject { cg_image } = env.objc.borrow(image);
+    if cg_image == nil {
+        return nil;
+    }
+    let img = cg_image::borrow_image(&env.objc, cg_image);
+    let (width, height) = img.dimensions();
+    let pixels = img.pixels();
+    let png_bytes = crate::image::encode_rgba_to_png(width, height, pixels, false);
+    ns_data::from_rust_slice(env, &png_bytes)
+}
+
+pub fn UIImageJPEGRepresentation(env: &mut Environment, image: id, _compression_quality: CGFloat) -> id {
+    UIImagePNGRepresentation(env, image)
+}
+
+pub const FUNCTIONS: FunctionExports = &[
+    export_c_func!(UIImagePNGRepresentation(_)),
+    export_c_func!(UIImageJPEGRepresentation(_, _)),
+];
+

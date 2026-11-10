@@ -11,6 +11,7 @@ use super::{CGFloat, CGPoint, CGRect, CGSize};
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::font::Font;
 use crate::frameworks::core_foundation::cf_data::CFDataRef;
+use crate::frameworks::core_foundation::cf_string::CFStringRef;
 use crate::frameworks::core_foundation::{CFRelease, CFRetain, CFTypeRef};
 use crate::frameworks::core_graphics::cg_geometry::CGRectZero;
 use crate::frameworks::foundation::unichar;
@@ -45,6 +46,14 @@ fn CGFontCreateWithDataProvider(env: &mut Environment, provider: CGDataProviderR
     let class = env.objc.get_known_class("_touchHLE_CGFont", &mut env.mem);
     env.objc.alloc_object(class, host_obj, &mut env.mem)
 }
+
+fn CGFontCreateWithFontName(env: &mut Environment, _name: CFStringRef) -> CGFontRef {
+    let font = Font::sans_regular();
+    let host_obj = Box::new(CGFontHostObject { font });
+    let class = env.objc.get_known_class("_touchHLE_CGFont", &mut env.mem);
+    env.objc.alloc_object(class, host_obj, &mut env.mem)
+}
+
 
 pub fn CGFontRetain(env: &mut Environment, font: CGFontRef) -> CGFontRef {
     if !font.is_null() {
@@ -184,8 +193,29 @@ fn CGFontGetNumberOfGlyphs(env: &mut Environment, font: CGFontRef) -> GuestUSize
     font.number_of_glyphs().into()
 }
 
+fn CGFontGetCapHeight(env: &mut Environment, font: CGFontRef) -> i32 {
+    let font = &env.objc.borrow::<CGFontHostObject>(font).font;
+    let gid = font.glyph_id_for_char('H' as u16).0;
+    if let Some((_, _, _, y_max)) = font.glyph_bounding_box(gid) {
+        y_max as i32
+    } else {
+        (font.ascent_unscaled() * 0.7) as i32
+    }
+}
+
+fn CGFontGetXHeight(env: &mut Environment, font: CGFontRef) -> i32 {
+    let font = &env.objc.borrow::<CGFontHostObject>(font).font;
+    let gid = font.glyph_id_for_char('x' as u16).0;
+    if let Some((_, _, _, y_max)) = font.glyph_bounding_box(gid) {
+        y_max as i32
+    } else {
+        (font.ascent_unscaled() * 0.5) as i32
+    }
+}
+
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CGFontCreateWithDataProvider(_)),
+    export_c_func!(CGFontCreateWithFontName(_)),
     export_c_func!(CGFontRetain(_)),
     export_c_func!(CGFontRelease(_)),
     export_c_func!(CGFontGetGlyphsForUnichars(_, _, _, _)),
@@ -193,6 +223,8 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CGFontGetAscent(_)),
     export_c_func!(CGFontGetDescent(_)),
     export_c_func!(CGFontGetLeading(_)),
+    export_c_func!(CGFontGetCapHeight(_)),
+    export_c_func!(CGFontGetXHeight(_)),
     export_c_func!(CGFontGetFontBBox(_)),
     export_c_func!(CGFontGetGlyphAdvances(_, _, _, _)),
     export_c_func!(CGFontGetGlyphBBoxes(_, _, _, _)),
@@ -200,3 +232,4 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CGFontCopyTableForTag(_, _)),
     export_c_func!(CGFontGetNumberOfGlyphs(_)),
 ];
+

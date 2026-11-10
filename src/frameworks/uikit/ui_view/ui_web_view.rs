@@ -7,7 +7,7 @@
 
 use crate::frameworks::foundation::ns_string::to_rust_string;
 use crate::msg;
-use crate::objc::{id, nil, objc_classes, ClassExports};
+use crate::objc::{id, msg_super, nil, objc_classes, ClassExports};
 use std::borrow::Cow;
 
 pub const CLASSES: ClassExports = objc_classes! {
@@ -17,8 +17,8 @@ pub const CLASSES: ClassExports = objc_classes! {
 @implementation UIWebView: UIView
 
 // NSCoding implementation
-- (id)initWithCoder:(id)_coder {
-    todo!()
+- (id)initWithCoder:(id)coder {
+    msg_super![env; this initWithCoder:coder]
 }
 
 - (())setScalesPageToFit:(bool)_scales {
@@ -26,6 +26,9 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 - (())setDelegate:(id)_delegate {
     // TODO
+}
+- (id)delegate {
+    nil
 }
 - (())loadRequest:(id)request { // NSURLRequest*
     let url_string = if request != nil {
@@ -36,6 +39,11 @@ pub const CLASSES: ClassExports = objc_classes! {
         Cow::default()
     };
     log!("TODO: [(UIWebView*) {:?} loadRequest:{:?} ({})]", this, request, url_string);
+}
+
+- (())loadHTMLString:(id)string baseURL:(id)baseURL {
+    let html_string = to_rust_string(env, string);
+    log!("TODO: [(UIWebView*) {:?} loadHTMLString (len={}) baseURL:{:?}]", this, html_string.len(), baseURL);
 }
 
 @end

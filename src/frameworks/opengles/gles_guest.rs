@@ -1348,6 +1348,24 @@ fn glGenerateMipmapOES(env: &mut Environment, target: GLenum) {
     with_ctx_and_mem(env, |gles, _mem| unsafe { gles.GenerateMipmapOES(target) })
 }
 
+fn glDiscardFramebufferEXT(
+    _env: &mut Environment,
+    _target: GLenum,
+    _num_attachments: GLsizei,
+    _attachments: ConstPtr<GLenum>,
+) {
+    // GL_EXT_discard_framebuffer is an optimization hint for tile-based GPUs; safe to no-op.
+}
+
+fn glPointSizePointerOES(
+    _env: &mut Environment,
+    _type: GLenum,
+    _stride: GLsizei,
+    _pointer: ConstVoidPtr,
+) {
+    // Stub for GL_OES_point_size_array
+}
+
 fn glGetBufferParameteriv(
     env: &mut Environment,
     target: GLenum,
@@ -1634,6 +1652,8 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(glGetBufferParameteriv(_, _, _)),
     export_c_func!(glMapBufferOES(_, _)),
     export_c_func!(glUnmapBufferOES(_)),
+    export_c_func!(glDiscardFramebufferEXT(_, _, _)),
+    export_c_func!(glPointSizePointerOES(_, _, _)),
 ];
 
 fn _get_currently_bound_buffer_object_name(env: &mut Environment, target: GLenum) -> GLuint {

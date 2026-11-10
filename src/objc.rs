@@ -31,7 +31,7 @@ mod properties;
 mod selectors;
 mod synchronization;
 
-pub use classes::{objc_classes, Class, ClassExports, ClassTemplate};
+pub use classes::{class_getMethodImplementation, objc_classes, Class, ClassExports, ClassTemplate};
 pub use messages::{
     autorelease, msg, msg_class, msg_send, msg_send_no_initialize, msg_send_no_type_checking,
     msg_send_super2, msg_super, objc_super, release, retain,
@@ -46,7 +46,7 @@ pub use selectors::{selector, SEL};
 use crate::mem::ConstVoidPtr;
 use crate::Environment;
 use classes::{
-    class_getInstanceSize, class_getMethodImplementation, class_getProperty, class_getSuperclass,
+    class_getInstanceSize, class_getProperty, class_getSuperclass,
     class_replaceMethod, objc_getClass, ClassHostObject, FakeClass, UnimplementedClass,
 };
 pub(crate) use messages::objc_msgSend;
@@ -117,6 +117,12 @@ const CONSTANTS: ConstantExports = &[
     // and avoids a linker error for the integration tests.
     ("__objc_empty_vtable", HostConstant::NullPtr),
     ("__objc_empty_cache", HostConstant::NullPtr),
+    ("__NSConcreteStackBlock", HostConstant::NullPtr),
+    ("_NSConcreteStackBlock", HostConstant::NullPtr),
+    ("__NSConcreteGlobalBlock", HostConstant::NullPtr),
+    ("_NSConcreteGlobalBlock", HostConstant::NullPtr),
+    ("___objc_personality_v0", HostConstant::NullPtr),
+    ("__objc_personality_v0", HostConstant::NullPtr),
 ];
 
 /// Block support is iOS 4+, but it seems like Block Runtime Helpers
@@ -132,6 +138,15 @@ fn _Block_object_dispose(_env: &mut Environment, object: ConstVoidPtr, flags: i3
         "Warning: Ignoring _Block_object_dispose({:?}, BLOCK_FIELD_IS_BYREF)",
         object
     );
+}
+
+fn _Block_object_assign(
+    _env: &mut Environment,
+    _dest: crate::mem::MutVoidPtr,
+    _object: ConstVoidPtr,
+    _flags: i32,
+) {
+    // Stub for block copy helper
 }
 
 const FUNCTIONS: FunctionExports = &[
@@ -152,4 +167,5 @@ const FUNCTIONS: FunctionExports = &[
     export_c_func!(object_getClass(_)),
     export_c_func!(sel_registerName(_)),
     export_c_func!(_Block_object_dispose(_, _)),
+    export_c_func!(_Block_object_assign(_, _, _)),
 ];

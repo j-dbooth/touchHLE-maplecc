@@ -61,9 +61,12 @@ impl Bundle {
 
     /// Create a fake bundle (see [crate::Environment::new_without_app]).
     pub fn new_fake_bundle() -> Bundle {
+        let mut plist = Dictionary::new();
+        plist.insert("CFBundleIdentifier".to_string(), Value::String("org.touchhle.test".to_string()));
+        plist.insert("CFBundleVersion".to_string(), Value::String("1.0".to_string()));
         Bundle {
-            path: GuestPathBuf::from(String::new()),
-            plist: Dictionary::new(),
+            path: GuestPathBuf::from("/var/mobile/Applications/00000000-0000-0000-0000-000000000000/Test.app".to_string()),
+            plist,
         }
     }
 
@@ -72,11 +75,11 @@ impl Bundle {
     }
 
     pub fn bundle_identifier(&self) -> &str {
-        self.plist["CFBundleIdentifier"].as_string().unwrap()
+        self.plist.get("CFBundleIdentifier").and_then(|v| v.as_string()).unwrap_or("")
     }
 
     pub fn bundle_version(&self) -> &str {
-        self.plist["CFBundleVersion"].as_string().unwrap()
+        self.plist.get("CFBundleVersion").and_then(|v| v.as_string()).unwrap_or("")
     }
 
     pub fn bundle_localizations(&self) -> &[Value] {

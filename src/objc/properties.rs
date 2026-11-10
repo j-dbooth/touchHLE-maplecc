@@ -14,7 +14,7 @@
 //!
 //! See also: [crate::frameworks::foundation::ns_object].
 
-use super::{id, msg, nil, release, retain, Class, ClassHostObject, ObjC, SEL};
+use super::{autorelease, id, msg, nil, release, retain, Class, ClassHostObject, ObjC, SEL};
 use crate::mem::{
     guest_size_of, ConstPtr, ConstVoidPtr, GuestISize, GuestUSize, Mem, MutPtr, MutVoidPtr, Ptr,
     SafeRead,
@@ -55,65 +55,71 @@ impl ClassHostObject {
         for i in 0..count {
             let ivar_ptr: ConstPtr<ivar_t> = Ptr::from_bits(ivars_base_ptr.to_bits() + i * entsize);
 
-            // TODO: support type strings
             let ivar_t {
                 offset,
                 name,
+                type_,
                 alignment,
                 ..
             } = mem.read(ivar_ptr);
 
             let name_string = mem.cstr_at_utf8(name).unwrap().into();
-            self.ivars.insert(name_string, (offset, alignment));
+            let type_string = if !type_.is_null() {
+                mem.cstr_at_utf8(type_).map(|s| s.to_string()).ok()
+            } else {
+                None
+            };
+            let byte_alignment = if alignment == !0 {
+                guest_size_of::<GuestUSize>() as u32
+            } else if alignment <= 8 {
+                1u32 << alignment
+            } else {
+                alignment
+            };
+            self.ivars.insert(name_string, (offset, byte_alignment, type_string));
         }
     }
 }
 
 impl ObjC {
     /// Checks if the object's class has an ivar in its class chain with the
-    /// provided name and returns the pointer to the object's ivar, if any,
+    /// provided name and returns the pointer to the object's ivar and its optional type encoding,
     /// or None if the object's class doesn't have an ivar with that name.
     pub fn object_lookup_ivar(
         &self,
         mem: &Mem,
         obj: id,
-        name: &String,
-    ) -> Option<MutPtr<GuestUSize>> {
+        name: &str,
+    ) -> Option<(MutVoidPtr, Option<String>)> {
+        if obj == nil {
+            return None;
+        }
         let mut class = ObjC::read_isa(obj, mem);
-        loop {
-            let &ClassHostObject {
-                superclass,
-                ref ivars,
-                ..
-            } = self.borrow(class);
-            if let Some((ivar_offset_ptr, _)) = ivars.get(name) {
+        while class != nil {
+            let Some(host_obj) = self.try_borrow::<ClassHostObject>(class) else {
+                return None;
+            };
+            if let Some((ivar_offset_ptr, _, ref type_string)) = host_obj.ivars.get(name) {
                 let ivar_offset = mem.read(*ivar_offset_ptr);
                 let ivar_ptr = MutVoidPtr::from_bits(obj.to_bits() + ivar_offset);
-                return Some(ivar_ptr.cast());
-            } else if superclass == nil {
-                return None;
-            } else {
-                class = superclass;
+                return Some((ivar_ptr, type_string.clone()));
             }
+            class = host_obj.superclass;
         }
+        None
     }
 
+    #[allow(dead_code)]
     pub fn debug_all_class_ivars_as_strings(&self, class: Class) -> Vec<String> {
         let mut class = class;
         let mut ivars_strings = Vec::new();
-        loop {
-            let &ClassHostObject {
-                superclass,
-                ref ivars,
-                ..
-            } = self.borrow(class);
-            let mut class_ivars_strings = ivars.keys().cloned().collect();
-            ivars_strings.append(&mut class_ivars_strings);
-            if superclass == nil {
+        while class != nil {
+            let Some(host_obj) = self.try_borrow::<ClassHostObject>(class) else {
                 break;
-            } else {
-                class = superclass;
-            }
+            };
+            let mut class_ivars_strings = host_obj.ivars.keys().cloned().collect();
+            ivars_strings.append(&mut class_ivars_strings);
+            class = host_obj.superclass;
         }
         ivars_strings
     }
@@ -141,7 +147,12 @@ pub(super) fn objc_getProperty(
     }
 
     let ivar: MutPtr<id> = Ptr::from_bits(this.to_bits().checked_add_signed(offset).unwrap());
-    env.mem.read(ivar)
+    let val: id = env.mem.read(ivar);
+    if atomic && val != nil {
+        retain(env, val);
+        autorelease(env, val);
+    }
+    val
 }
 
 /// Undocumented function (see link above) apparently used by auto-generated

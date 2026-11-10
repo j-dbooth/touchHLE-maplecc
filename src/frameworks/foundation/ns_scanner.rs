@@ -232,14 +232,20 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 
     let st = to_rust_string(env, left);
+    let mut has_digits = false;
     let mut cutoff = st.len();
     for (i, c) in st.char_indices() {
-        if !c.is_ascii_digit() && c != '+' && c != '-' {
-            cutoff = i;
-            break;
+        if i == 0 && (c == '+' || c == '-') {
+            continue;
         }
+        if c.is_ascii_digit() {
+            has_digits = true;
+            continue;
+        }
+        cutoff = i;
+        break;
     }
-    if cutoff == 0 {
+    if !has_digits || cutoff == 0 {
         log_dbg!("scanInt: no valid int found for '{}'", st);
         *env.objc.borrow_mut::<NSScannerHostObject>(this) = NSScannerHostObject { to_be_skipped, string, len, pos };
         return false;

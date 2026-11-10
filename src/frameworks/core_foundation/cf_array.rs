@@ -9,16 +9,62 @@
 //! implementation. Here they are the same types.
 
 use super::cf_allocator::{kCFAllocatorDefault, CFAllocatorRef};
+use super::cf_dictionary::create_default_callback_functions;
 use super::CFIndex;
-use crate::dyld::{export_c_func, FunctionExports};
-use crate::frameworks::foundation::NSUInteger;
-use crate::mem::ConstVoidPtr;
-use crate::objc::{id, msg, msg_class};
+use crate::abi::GuestFunction;
+use crate::dyld::{export_c_func, ConstantExports, FunctionExports, HostConstant};
+use crate::frameworks::foundation::{ns_array, NSUInteger};
+use crate::mem::{ConstPtr, ConstVoidPtr, SafeRead};
+use crate::objc::{id, msg, msg_class, retain};
 use crate::Environment;
 
 #[allow(dead_code)]
 pub type CFArrayRef = super::CFTypeRef;
 pub type CFMutableArrayRef = super::CFTypeRef;
+
+#[repr(C, packed)]
+pub struct CFArrayCallBacks {
+    pub version: CFIndex,
+    pub retain: GuestFunction,
+    pub release: GuestFunction,
+    pub copy_desc: GuestFunction,
+    pub equal: GuestFunction,
+}
+unsafe impl SafeRead for CFArrayCallBacks {}
+
+pub const CONSTANTS: ConstantExports = &[
+    (
+        "_kCFTypeArrayCallBacks",
+        HostConstant::Custom(|env| {
+            let common = create_default_callback_functions(&mut env.mem, &mut env.dyld);
+            let callbacks = CFArrayCallBacks {
+                version: 0,
+                retain: common.retain,
+                release: common.release,
+                copy_desc: common.copy_desc,
+                equal: common.equal,
+            };
+            env.mem.alloc_and_write(callbacks).cast_void().cast_const()
+        }),
+    ),
+];
+
+fn CFArrayCreate(
+    env: &mut Environment,
+    allocator: CFAllocatorRef,
+    values: ConstPtr<id>,
+    num_values: CFIndex,
+    _callbacks: ConstVoidPtr,
+) -> CFArrayRef {
+    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default());
+    let mut objects = Vec::with_capacity(num_values as usize);
+    for i in 0..(num_values as usize) {
+        let val: id = env.mem.read(values + i as u32);
+        retain(env, val);
+        objects.push(val);
+    }
+    ns_array::from_vec(env, objects)
+}
 
 fn CFArrayCreateMutable(
     env: &mut Environment,
@@ -55,6 +101,7 @@ fn CFArrayRemoveValueAtIndex(env: &mut Environment, array: CFMutableArrayRef, id
 }
 
 pub const FUNCTIONS: FunctionExports = &[
+    export_c_func!(CFArrayCreate(_, _, _, _)),
     export_c_func!(CFArrayCreateMutable(_, _, _)),
     export_c_func!(CFArrayGetCount(_)),
     export_c_func!(CFArrayGetValueAtIndex(_, _)),

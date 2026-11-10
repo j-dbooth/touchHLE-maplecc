@@ -729,8 +729,12 @@ impl GLES for GLES1OnGL2<'_> {
                 "Tolerating glEnableClientState({:#x}) of a capability",
                 array
             );
-        } else {
-            assert!(ARRAYS.iter().any(|&ArrayInfo { name, .. }| name == array));
+        } else if !ARRAYS.iter().any(|&ArrayInfo { name, .. }| name == array) {
+            log_dbg!(
+                "Tolerating glEnableClientState({:#x}) of unknown/unsupported array",
+                array
+            );
+            return;
         }
         gl21::EnableClientState(array);
     }
@@ -740,8 +744,12 @@ impl GLES for GLES1OnGL2<'_> {
                 "Tolerating glDisableClientState({:#x}) of a capability",
                 array
             );
-        } else {
-            assert!(ARRAYS.iter().any(|&ArrayInfo { name, .. }| name == array));
+        } else if !ARRAYS.iter().any(|&ArrayInfo { name, .. }| name == array) {
+            log_dbg!(
+                "Tolerating glDisableClientState({:#x}) of unknown/unsupported array",
+                array
+            );
+            return;
         }
         gl21::DisableClientState(array);
     }

@@ -8,6 +8,7 @@
 //! Resources:
 //! - [View Controller Programming Guide for iOS (Legacy)](https://developer.apple.com/library/archive/documentation/WindowsViews/Conceptual/ViewControllerPGforiOSLegacy/BasicViewControllers/BasicViewControllers.html)
 
+use crate::abi::CallFromHost;
 use crate::frameworks::core_graphics::CGRect;
 use crate::frameworks::foundation::ns_objc_runtime::NSStringFromClass;
 use crate::frameworks::foundation::ns_string::{from_rust_string, get_static_str, to_rust_string};
@@ -17,7 +18,7 @@ use crate::frameworks::uikit::ui_application::{
 };
 use crate::frameworks::uikit::ui_view::set_view_controller;
 use crate::objc::{
-    id, msg, msg_class, nil, objc_classes, release, retain, todo_objc_setter, Class, ClassExports,
+    id, msg, msg_class, msg_super, nil, objc_classes, release, retain, todo_objc_setter, Class, ClassExports,
     HostObject, NSZonePtr,
 };
 use crate::Environment;
@@ -37,6 +38,16 @@ struct UIViewControllerHostObject {
     /// of the nib by name, may be nil.
     /// `NSBundle*`
     bundle: id,
+    /// Presented modal view controller
+    /// `UIViewController*`
+    modal_view_controller: id,
+    /// Parent / presenting view controller
+    /// `UIViewController*`
+    parent_view_controller: id,
+    /// `NSString*`
+    title: id,
+    /// Whether viewDidLoad has already been invoked for the current view hierarchy.
+    view_did_load_called: bool,
 }
 impl HostObject for UIViewControllerHostObject {}
 
@@ -70,14 +81,36 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (id)initWithCoder:(id)coder {
     let key_ns_string = get_static_str(env, "UIView");
     let view: id = msg![env; coder decodeObjectForKey:key_ns_string];
+    if view != nil {
+        () = msg![env; this setView:view];
+    }
 
-    () = msg![env; this setView:view];
+    let nib_key = get_static_str(env, "UINibName");
+    let nib_name: id = msg![env; coder decodeObjectForKey:nib_key];
+    if nib_name != nil {
+        retain(env, nib_name);
+        env.objc.borrow_mut::<UIViewControllerHostObject>(this).nib_name = nib_name;
+    }
+
+    let bundle_key = get_static_str(env, "UINibBundle");
+    let bundle: id = msg![env; coder decodeObjectForKey:bundle_key];
+    if bundle != nil {
+        retain(env, bundle);
+        env.objc.borrow_mut::<UIViewControllerHostObject>(this).bundle = bundle;
+    }
+
+    let title_key = get_static_str(env, "UITitle");
+    let title: id = msg![env; coder decodeObjectForKey:title_key];
+    if title != nil {
+        retain(env, title);
+        env.objc.borrow_mut::<UIViewControllerHostObject>(this).title = title;
+    }
 
     this
 }
 
 - (())dealloc {
-    let &UIViewControllerHostObject { view, nib_name, bundle } = env.objc.borrow(this);
+    let &UIViewControllerHostObject { view, nib_name, bundle, modal_view_controller, title, .. } = env.objc.borrow(this);
 
     if view != nil {
         set_view_controller(env, view, nil);
@@ -85,6 +118,8 @@ pub const CLASSES: ClassExports = objc_classes! {
     release(env, view);
     release(env, nib_name);
     release(env, bundle);
+    release(env, modal_view_controller);
+    release(env, title);
 
     env.objc.dealloc_object(this, &mut env.mem);
 }
@@ -136,6 +171,9 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (())setView:(id)new_view { // UIView*
     let host_obj = env.objc.borrow_mut::<UIViewControllerHostObject>(this);
+    if new_view == nil {
+        host_obj.view_did_load_called = false;
+    }
     let old_view = std::mem::replace(&mut host_obj.view, new_view);
     if old_view != nil {
         set_view_controller(env, old_view, nil);
@@ -147,14 +185,36 @@ pub const CLASSES: ClassExports = objc_classes! {
     release(env, old_view);
 }
 - (id)view {
-    let view = env.objc.borrow_mut::<UIViewControllerHostObject>(this).view;
+    let view = env.objc.borrow::<UIViewControllerHostObject>(this).view;
     if view == nil {
         () = msg![env; this loadView];
-        let view = env.objc.borrow_mut::<UIViewControllerHostObject>(this).view;
+    }
+    let (view, should_call_viewDidLoad) = {
+        let host = env.objc.borrow_mut::<UIViewControllerHostObject>(this);
+        let should = !host.view_did_load_called && host.view != nil;
+        if should {
+            host.view_did_load_called = true;
+        }
+        (host.view, should)
+    };
+    if should_call_viewDidLoad {
         () = msg![env; this viewDidLoad];
-        view
-    } else {
-        view
+    }
+    view
+}
+
+- (())awakeFromNib {
+    let _: () = msg_super![env; this awakeFromNib];
+    let should_call_viewDidLoad = {
+        let host = env.objc.borrow_mut::<UIViewControllerHostObject>(this);
+        let should = !host.view_did_load_called && host.view != nil;
+        if should {
+            host.view_did_load_called = true;
+        }
+        should
+    };
+    if should_call_viewDidLoad {
+        () = msg![env; this viewDidLoad];
     }
 }
 
@@ -175,8 +235,14 @@ pub const CLASSES: ClassExports = objc_classes! {
     log_dbg!("[(UIViewController*){:?} viewDidDisappear:{}]", this, animated);
 }
 
+- (id)title {
+    env.objc.borrow::<UIViewControllerHostObject>(this).title
+}
 - (())setTitle:(id)title { // NSString *
-    todo_objc_setter!(this, to_rust_string(env, title));
+    retain(env, title);
+    let old_title = env.objc.borrow_mut::<UIViewControllerHostObject>(this).title;
+    env.objc.borrow_mut::<UIViewControllerHostObject>(this).title = title;
+    release(env, old_title);
 }
 - (())setEditing:(bool)editing {
     todo_objc_setter!(this, editing);
@@ -191,11 +257,114 @@ pub const CLASSES: ClassExports = objc_classes! {
     todo_objc_setter!(this, style);
 }
 
-- (())dismissModalViewControllerAnimated:(bool)animated {
-    log!("TODO: [(UIViewController*){:?} dismissModalViewControllerAnimated:{}]", this, animated); // TODO
+- (bool)isViewLoaded {
+    let host = env.objc.borrow::<UIViewControllerHostObject>(this);
+    host.view != nil
 }
+
+- (id)modalViewController {
+    env.objc.borrow::<UIViewControllerHostObject>(this).modal_view_controller
+}
+
+- (id)presentedViewController {
+    env.objc.borrow::<UIViewControllerHostObject>(this).modal_view_controller
+}
+
+- (id)parentViewController {
+    env.objc.borrow::<UIViewControllerHostObject>(this).parent_view_controller
+}
+
+- (id)presentingViewController {
+    env.objc.borrow::<UIViewControllerHostObject>(this).parent_view_controller
+}
+
+- (())presentModalViewController:(id)modal animated:(bool)animated {
+    if modal == nil {
+        return;
+    }
+    retain(env, modal);
+    let old_modal = {
+        let host = env.objc.borrow_mut::<UIViewControllerHostObject>(this);
+        let old = host.modal_view_controller;
+        host.modal_view_controller = modal;
+        old
+    };
+    if old_modal != nil {
+        release(env, old_modal);
+    }
+    {
+        let modal_host = env.objc.borrow_mut::<UIViewControllerHostObject>(modal);
+        modal_host.parent_view_controller = this;
+    }
+
+    () = msg![env; this viewWillDisappear:animated];
+    () = msg![env; modal viewWillAppear:animated];
+
+    let this_view: id = msg![env; this view];
+    let modal_view: id = msg![env; modal view];
+
+    if modal_view != nil {
+        let window: id = if this_view != nil { msg![env; this_view window] } else { nil };
+        if window != nil {
+            () = msg![env; window addSubview:modal_view];
+        } else if this_view != nil {
+            () = msg![env; this_view addSubview:modal_view];
+        }
+    }
+
+    () = msg![env; this viewDidDisappear:animated];
+    () = msg![env; modal viewDidAppear:animated];
+}
+
+- (())dismissModalViewControllerAnimated:(bool)animated {
+    let (presenter, modal) = {
+        let host = env.objc.borrow::<UIViewControllerHostObject>(this);
+        if host.modal_view_controller != nil {
+            (this, host.modal_view_controller)
+        } else if host.parent_view_controller != nil {
+            (host.parent_view_controller, this)
+        } else {
+            log!("dismissModalViewControllerAnimated: called with no modal controller on {:?}", this);
+            return;
+        }
+    };
+
+    () = msg![env; modal viewWillDisappear:animated];
+    () = msg![env; presenter viewWillAppear:animated];
+
+    let modal_view: id = msg![env; modal view];
+    if modal_view != nil {
+        () = msg![env; modal_view removeFromSuperview];
+    }
+
+    env.objc.borrow_mut::<UIViewControllerHostObject>(presenter).modal_view_controller = nil;
+    env.objc.borrow_mut::<UIViewControllerHostObject>(modal).parent_view_controller = nil;
+    release(env, modal);
+
+    () = msg![env; modal viewDidDisappear:animated];
+    () = msg![env; presenter viewDidAppear:animated];
+}
+
+- (())presentViewController:(id)viewController animated:(bool)animated completion:(id)completion {
+    () = msg![env; this presentModalViewController:viewController animated:animated];
+    if completion != nil {
+        let invoke_addr: u32 = env.mem.read(crate::mem::ConstPtr::<u32>::from_bits(completion.to_bits() + 12));
+        let invoke = crate::abi::GuestFunction::from_addr_with_thumb_bit(invoke_addr);
+        let (): () = invoke.call_from_host(env, (completion,));
+    }
+}
+
+- (())dismissViewControllerAnimated:(bool)animated completion:(id)completion {
+    () = msg![env; this dismissModalViewControllerAnimated:animated];
+    if completion != nil {
+        let invoke_addr: u32 = env.mem.read(crate::mem::ConstPtr::<u32>::from_bits(completion.to_bits() + 12));
+        let invoke = crate::abi::GuestFunction::from_addr_with_thumb_bit(invoke_addr);
+        let (): () = invoke.call_from_host(env, (completion,));
+    }
+}
+
 - (())dismissMoviePlayerViewControllerAnimated {
-    log!("TODO: [(UIViewController*){:?} dismissMoviePlayerViewControllerAnimated]", this); // TODO
+    () = msg![env; this dismissModalViewControllerAnimated:true];
 }
 
 - (bool)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interface_orientation {

@@ -98,6 +98,110 @@ pub fn borrow_image_mut(objc: &mut ObjC, image: CGImageRef) -> &mut Image {
 
 // TODO: More create methods.
 
+pub(crate) fn convert_cg_image_pixels(
+    raw_bytes: &[u8],
+    width: usize,
+    height: usize,
+    bits_per_pixel: usize,
+    bytes_per_row: usize,
+    byte_order: CGImageByteOrderInfo,
+    alpha_info: CGImageAlphaInfo,
+) -> Vec<u8> {
+    match byte_order {
+        kCGImageByteOrderDefault | kCGImageByteOrder32Big => {
+            if bits_per_pixel == 24 {
+                assert_eq!(alpha_info, kCGImageAlphaNone);
+                assert!(bytes_per_row >= width * 3);
+                let mut pixels = Vec::with_capacity(width * height * 4);
+                for y in 0..height {
+                    let row_start = y * bytes_per_row;
+                    let row = &raw_bytes[row_start..row_start + width * 3];
+                    for chunk in row.chunks_exact(3) {
+                        pixels.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 0xFF]);
+                    }
+                }
+                pixels
+            } else {
+                assert_eq!(bits_per_pixel, 32);
+                assert!(bytes_per_row >= width * 4);
+                let mut pixels = Vec::with_capacity(width * height * 4);
+                for y in 0..height {
+                    let row_start = y * bytes_per_row;
+                    let row = &raw_bytes[row_start..row_start + width * 4];
+                    pixels.extend_from_slice(row);
+                }
+                match alpha_info {
+                    kCGImageAlphaPremultipliedLast | kCGImageAlphaLast => {
+                        // [R, G, B, A] (keep as-is)
+                    }
+                    kCGImageAlphaNone | kCGImageAlphaNoneSkipLast => {
+                        for chunk in pixels.as_chunks_mut::<4>().0 {
+                            chunk[3] = 0xFF;
+                        }
+                    }
+                    kCGImageAlphaPremultipliedFirst | kCGImageAlphaFirst => {
+                        for chunk in pixels.as_chunks_mut::<4>().0 {
+                            chunk.rotate_left(1);
+                        }
+                    }
+                    kCGImageAlphaNoneSkipFirst => {
+                        for chunk in pixels.as_chunks_mut::<4>().0 {
+                            chunk[0] = chunk[1];
+                            chunk[1] = chunk[2];
+                            chunk[2] = chunk[3];
+                            chunk[3] = 0xFF;
+                        }
+                    }
+                    _ => unimplemented!("unsupported alpha_info in CGImageCreate: {alpha_info}"),
+                }
+                pixels
+            }
+        }
+        kCGImageByteOrder32Little => {
+            assert_eq!(bits_per_pixel, 32);
+            assert!(bytes_per_row >= width * 4);
+            let mut pixels = Vec::with_capacity(width * height * 4);
+            for y in 0..height {
+                let row_start = y * bytes_per_row;
+                let row = &raw_bytes[row_start..row_start + width * 4];
+                pixels.extend_from_slice(row);
+            }
+            for chunk in pixels.as_chunks_mut::<4>().0 {
+                chunk.reverse();
+            }
+            match alpha_info {
+                kCGImageAlphaPremultipliedLast | kCGImageAlphaLast => {
+                    // [A, B, G, R] reversed to [R, G, B, A] (keep as-is)
+                }
+                kCGImageAlphaNone | kCGImageAlphaNoneSkipLast => {
+                    // [X, B, G, R] reversed to [R, G, B, X] -> force alpha to 0xFF
+                    for chunk in pixels.as_chunks_mut::<4>().0 {
+                        chunk[3] = 0xFF;
+                    }
+                }
+                kCGImageAlphaPremultipliedFirst | kCGImageAlphaFirst => {
+                    // [B, G, R, A] reversed to [A, R, G, B] -> rotate left 1 to [R, G, B, A]
+                    for chunk in pixels.as_chunks_mut::<4>().0 {
+                        chunk.rotate_left(1);
+                    }
+                }
+                kCGImageAlphaNoneSkipFirst => {
+                    // [B, G, R, X] reversed to [X, R, G, B] -> [R, G, B, 0xFF]
+                    for chunk in pixels.as_chunks_mut::<4>().0 {
+                        chunk[0] = chunk[1];
+                        chunk[1] = chunk[2];
+                        chunk[2] = chunk[3];
+                        chunk[3] = 0xFF;
+                    }
+                }
+                _ => unimplemented!("unsupported alpha_info in CGImageCreate: {alpha_info}"),
+            }
+            pixels
+        }
+        _ => unimplemented!("unsupported byte_order in CGImageCreate: {byte_order}"),
+    }
+}
+
 fn CGImageCreate(
     env: &mut Environment,
     width: GuestUSize,
@@ -124,31 +228,29 @@ fn CGImageCreate(
     assert!(decode.is_null()); // TODO
     assert_eq!(CGColorSpaceGetModel(env, colorspace), kCGColorSpaceModelRGB);
     assert_eq!(bits_per_component, 8);
-    assert_eq!(bits_per_pixel, 32);
-    assert_eq!(width as u64 * 4, bytes_per_row as u64);
-
-    let mut pixels = cg_data_provider::borrow_bytes(env, provider).to_vec();
-    assert_eq!(pixels.len() as u64, width as u64 * height as u64 * 4);
-
     let byte_order = bitmap_info & kCGBitmapByteOrderMask;
     let alpha_info = bitmap_info & kCGBitmapAlphaInfoMask;
     assert_eq!(alpha_info | byte_order, bitmap_info); // TODO
-    match byte_order {
-        kCGImageByteOrderDefault | kCGImageByteOrder32Big => {
-            assert_eq!(alpha_info, kCGImageAlphaPremultipliedLast); // TODO
-        }
-        kCGImageByteOrder32Little => {
-            // TODO: fix CGImageGetAlphaInfo()
-            assert_eq!(alpha_info, kCGImageAlphaNoneSkipFirst); // TODO
-            for chunk in pixels.as_chunks_mut::<4>().0 {
-                // XRGB in 32 little endian -> RGBX in 32 big endian
-                chunk.swap(0, 2);
-                // Assume opaque, even though it is undefined
-                chunk[3] = 0xFF;
-            }
-        }
-        _ => unimplemented!("{byte_order}"),
-    }
+
+    assert!(
+        (bits_per_pixel == 32 && bytes_per_row as u64 >= width as u64 * 4)
+            || (bits_per_pixel == 24
+                && alpha_info == kCGImageAlphaNone
+                && bytes_per_row as u64 >= width as u64 * 3)
+    );
+
+    let raw_bytes = cg_data_provider::borrow_bytes(env, provider);
+    assert!(raw_bytes.len() as u64 >= (bytes_per_row as u64) * (height as u64));
+
+    let pixels = convert_cg_image_pixels(
+        raw_bytes,
+        width as usize,
+        height as usize,
+        bits_per_pixel as usize,
+        bytes_per_row as usize,
+        byte_order,
+        alpha_info,
+    );
 
     let image = Image::from_pixel_vec(pixels, (width, height));
     from_image(env, image)
@@ -287,7 +389,9 @@ fn CGImageCreateWithImageInRect(
             },
         },
     );
-    assert!(intersect != CGRectNull);
+    if intersect == CGRectNull {
+        return nil;
+    }
     let (x, y, w, h) = (
         intersect.origin.x as u32,
         intersect.origin.y as u32,
@@ -325,3 +429,146 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CGImageGetBitsPerComponent(_)),
     export_c_func!(CGImageCreateWithImageInRect(_, _)),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cg_image_create_gl_read_pixels_alpha_none() {
+        // AWScreenshot takeAsCGImage passes bitmap_info = 0 (kCGImageAlphaNone | kCGImageByteOrderDefault)
+        // with 32 bpp OpenGL framebuffer data where alpha byte might be undefined/0.
+        let raw = [10u8, 20, 30, 0, 40, 50, 60, 0];
+        let converted = convert_cg_image_pixels(
+            &raw,
+            2,
+            1,
+            32,
+            8,
+            kCGImageByteOrderDefault,
+            kCGImageAlphaNone,
+        );
+        assert_eq!(
+            converted,
+            vec![10, 20, 30, 0xFF, 40, 50, 60, 0xFF]
+        );
+    }
+
+    #[test]
+    fn test_cg_image_create_24bpp_rgb() {
+        let raw = [11u8, 22, 33, 44, 55, 66];
+        let converted = convert_cg_image_pixels(
+            &raw,
+            2,
+            1,
+            24,
+            6,
+            kCGImageByteOrderDefault,
+            kCGImageAlphaNone,
+        );
+        assert_eq!(
+            converted,
+            vec![11, 22, 33, 0xFF, 44, 55, 66, 0xFF]
+        );
+    }
+
+    #[test]
+    fn test_cg_image_create_32little_premultiplied_last() {
+        // In little-endian memory, 32-bit (R << 24 | G << 16 | B << 8 | A) is stored as [A, B, G, R].
+        // For 0x2001 (kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedLast), it should reverse to [R, G, B, A].
+        let raw = [0xAAu8, 0x30, 0x20, 0x10]; // [A, B, G, R]
+        let converted = convert_cg_image_pixels(
+            &raw,
+            1,
+            1,
+            32,
+            4,
+            kCGImageByteOrder32Little,
+            kCGImageAlphaPremultipliedLast,
+        );
+        assert_eq!(converted, vec![0x10, 0x20, 0x30, 0xAA]);
+    }
+
+    #[test]
+    fn test_cg_image_create_premultiplied_first() {
+        // [A, R, G, B] in big-endian / default byte order should rotate left 1 to [R, G, B, A].
+        let raw = [0xAAu8, 0x10, 0x20, 0x30];
+        let converted = convert_cg_image_pixels(
+            &raw,
+            1,
+            1,
+            32,
+            4,
+            kCGImageByteOrderDefault,
+            kCGImageAlphaPremultipliedFirst,
+        );
+        assert_eq!(converted, vec![0x10, 0x20, 0x30, 0xAA]);
+    }
+
+    #[test]
+    fn test_cg_image_create_32little_none_skip_first() {
+        // In little-endian memory with NoneSkipFirst (originally [X, R, G, B]), stored as [B, G, R, X].
+        let raw = [0x30u8, 0x20, 0x10, 0x00];
+        let converted = convert_cg_image_pixels(
+            &raw,
+            1,
+            1,
+            32,
+            4,
+            kCGImageByteOrder32Little,
+            kCGImageAlphaNoneSkipFirst,
+        );
+        assert_eq!(converted, vec![0x10, 0x20, 0x30, 0xFF]);
+    }
+
+    #[test]
+    fn test_cg_image_create_24bpp_with_row_padding() {
+        // 2 pixels wide, 24 bpp is 6 bytes. Padded to 8 bytes per row. 2 rows = 16 bytes.
+        let raw = [
+            1, 2, 3, 4, 5, 6, 0xEE, 0xEE, // row 0 + 2 padding bytes
+            7, 8, 9, 10, 11, 12, 0xFF, 0xFF, // row 1 + 2 padding bytes
+        ];
+        let converted = convert_cg_image_pixels(
+            &raw,
+            2,
+            2,
+            24,
+            8,
+            kCGImageByteOrderDefault,
+            kCGImageAlphaNone,
+        );
+        assert_eq!(
+            converted,
+            vec![
+                1, 2, 3, 0xFF, 4, 5, 6, 0xFF,
+                7, 8, 9, 0xFF, 10, 11, 12, 0xFF,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_cg_image_create_32bpp_with_row_padding() {
+        // 1 pixel wide, 32 bpp is 4 bytes. Padded to 8 bytes per row.
+        let raw = [
+            10, 20, 30, 40, 0xEE, 0xEE, 0xEE, 0xEE, // row 0 + 4 padding bytes
+            50, 60, 70, 80, 0xFF, 0xFF, 0xFF, 0xFF, // row 1 + 4 padding bytes
+        ];
+        let converted = convert_cg_image_pixels(
+            &raw,
+            1,
+            2,
+            32,
+            8,
+            kCGImageByteOrderDefault,
+            kCGImageAlphaPremultipliedLast,
+        );
+        assert_eq!(
+            converted,
+            vec![
+                10, 20, 30, 40,
+                50, 60, 70, 80,
+            ]
+        );
+    }
+}
+

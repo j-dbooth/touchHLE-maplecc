@@ -239,6 +239,47 @@ impl super::ObjC {
         self.objects.get(&object).map(|entry| &*entry.host_object)
     }
 
+    /// Check if an object exists and is alive in the runtime.
+    pub fn is_object_alive(&self, object: id) -> bool {
+        self.objects.contains_key(&object)
+    }
+
+    /// Try to get a reference to a host object and downcast it. Returns None if there is
+    /// no such object or if downcasting fails.
+    pub fn try_borrow<T: AnyHostObject + 'static>(&self, object: id) -> Option<&T> {
+        let mut host_object: &(dyn AnyHostObject + 'static) =
+            &*self.objects.get(&object)?.host_object;
+        loop {
+            if let Some(res) = host_object.as_any().downcast_ref() {
+                return Some(res);
+            } else if let Some(next) = host_object.as_superclass() {
+                host_object = next;
+            } else {
+                return None;
+            }
+        }
+    }
+
+    /// Try to get a mutable reference to a host object and downcast it. Returns None if
+    /// there is no such object or if downcasting fails.
+    #[allow(dead_code)]
+    pub fn try_borrow_mut<T: AnyHostObject + 'static>(&mut self, object: id) -> Option<&mut T> {
+        type Aho = dyn AnyHostObject + 'static;
+        let mut host_object: &mut Aho = &mut *self.objects.get_mut(&object)?.host_object;
+        loop {
+            if let Some(res) = unsafe { &mut *(host_object as *mut Aho) }
+                .as_any_mut()
+                .downcast_mut()
+            {
+                return Some(res);
+            } else if let Some(next) = host_object.as_superclass_mut() {
+                host_object = next;
+            } else {
+                return None;
+            }
+        }
+    }
+
     /// Get a reference to a host object and downcast it. Panics if there is
     /// no such object, or if downcasting fails.
     pub fn borrow<T: AnyHostObject + 'static>(&self, object: id) -> &T {

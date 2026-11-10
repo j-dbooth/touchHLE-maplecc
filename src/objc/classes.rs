@@ -40,9 +40,9 @@ pub(super) struct ClassHostObject {
     pub(super) superclass: Class,
     pub(super) methods: HashMap<SEL, IMP>,
     pub(super) guest_method_signatures: HashMap<SEL, ConstPtr<u8>>,
-    /// Maps ivar name to a tuple of an offset (as pointer) and an alignment.
+    /// Maps ivar name to a tuple of an offset (as pointer), an alignment, and an optional type encoding.
     /// (Alignment is used during ivar reconciliation.)
-    pub(super) ivars: HashMap<String, (ConstPtr<GuestUSize>, u32)>,
+    pub(super) ivars: HashMap<String, (ConstPtr<GuestUSize>, u32, Option<String>)>,
     /// Offset into the allocated memory for the object where the ivars of
     /// instances of this class or metaclass (respectively: normal objects or
     /// classes) should live. This is always >= the value in the superclass.
@@ -531,6 +531,15 @@ impl ObjC {
         self.link_class_inner(name, /* is_metaclass: */ false, mem, false)
     }
 
+    /// Try to find a class either already registered or with a host template, without falling back to a placeholder.
+    pub fn find_class(&mut self, name: &str, mem: &mut Mem) -> Option<Class> {
+        if self.classes.contains_key(name) || Self::find_template(name).is_some() {
+            Some(self.link_class(name, false, mem))
+        } else {
+            None
+        }
+    }
+
     fn link_class_inner(
         &mut self,
         name: &str,
@@ -716,57 +725,65 @@ impl ObjC {
         // reconciliation for _all of subclasses_
         while !queue.is_empty() {
             let next = queue.pop_front().unwrap();
-            let (need, mut diff) = self.need_ivar_reconciliation(next);
-            if need {
-                let ClassHostObject {
-                    name, superclass, ..
-                } = self.borrow(next);
-                log_dbg!(
-                    "Class {} need ivar reconciliation with superclass {}!",
-                    name,
-                    &self.borrow::<ClassHostObject>(*superclass).name
-                );
-
-                let ClassHostObject {
-                    ref mut instance_start,
-                    ref mut instance_size,
-                    ref mut ivars,
-                    ..
-                } = self.borrow_mut(next);
-
-                if !ivars.is_empty() {
-                    let mut max_alignment: u32 = 1;
-                    for (offset, align) in ivars.values() {
-                        if offset.is_null() {
-                            // anonymous bitfield
-                            continue;
-                        }
-                        max_alignment = max_alignment.max(*align);
-                    }
-
-                    let align_mask = max_alignment - 1;
-                    diff = (diff + align_mask) & !align_mask;
-
-                    for (offset, _) in ivars.values_mut() {
-                        if offset.is_null() {
-                            // anonymous bitfield
-                            continue;
-                        }
-
-                        *offset = Ptr::from_bits((*offset).to_bits() + diff);
-                    }
-                }
-
-                *instance_start += diff;
-                *instance_size += diff;
-            }
+            self.reconcile_ivars_for_class(next, mem);
             if let Some(subclasses) = inverted_inheritance.get(&next) {
                 queue.extend(subclasses);
             }
         }
     }
 
-    fn need_ivar_reconciliation(&mut self, class: Class) -> (bool, u32) {
+    pub fn reconcile_ivars_for_class(&mut self, class: Class, mem: &mut Mem) {
+        let (need, mut diff) = self.need_ivar_reconciliation(class);
+        if need {
+            let ClassHostObject {
+                name, superclass, ..
+            } = self.borrow(class);
+            log_dbg!(
+                "Class {} need ivar reconciliation with superclass {}!",
+                name,
+                &self.borrow::<ClassHostObject>(*superclass).name
+            );
+
+            let ClassHostObject {
+                ref mut instance_start,
+                ref mut instance_size,
+                ref ivars,
+                ..
+            } = self.borrow_mut(class);
+
+            if !ivars.is_empty() {
+                let mut max_alignment: u32 = 1;
+                for (offset, align, _) in ivars.values() {
+                    if offset.is_null() {
+                        // anonymous bitfield
+                        continue;
+                    }
+                    max_alignment = max_alignment.max(*align);
+                }
+
+                if max_alignment > 1 {
+                    let max_alignment = max_alignment.next_power_of_two();
+                    let align_mask = max_alignment - 1;
+                    diff = (diff + align_mask) & !align_mask;
+                }
+
+                for (offset, _, _) in ivars.values() {
+                    if offset.is_null() {
+                        // anonymous bitfield
+                        continue;
+                    }
+
+                    let current_offset: GuestUSize = mem.read(*offset);
+                    mem.write(offset.cast_mut(), current_offset + diff);
+                }
+            }
+
+            *instance_start += diff;
+            *instance_size += diff;
+        }
+    }
+
+    pub fn need_ivar_reconciliation(&mut self, class: Class) -> (bool, u32) {
         let class_host_object = self.get_host_object(class).unwrap().as_any().downcast_ref();
         let Some(ClassHostObject {
             name,
@@ -1094,7 +1111,7 @@ pub(super) fn class_replaceMethod(
     existing
 }
 
-pub(super) fn class_getMethodImplementation(env: &mut Environment, cls: Class, name: SEL) -> IMP {
+pub fn class_getMethodImplementation(env: &mut Environment, cls: Class, name: SEL) -> IMP {
     if cls == nil {
         return IMP::guest_null();
     }
@@ -1105,14 +1122,484 @@ pub(super) fn class_getMethodImplementation(env: &mut Environment, cls: Class, n
             ref methods,
             ..
         } = env.objc.borrow(class);
-        if methods.contains_key(&name) {
-            let method = methods.get(&name).unwrap().clone();
-            assert!(matches!(method, IMP::Guest(_))); // TODO
-            return method;
+        if let Some(method) = methods.get(&name) {
+            match method {
+                IMP::Guest(guest_imp) => return IMP::Guest(*guest_imp),
+                IMP::Host(_) => {
+                    log_dbg!(
+                        "class_getMethodImplementation: returning null for host method {:?}",
+                        name.as_str(&env.mem)
+                    );
+                    return IMP::guest_null();
+                }
+            }
         } else if next == nil {
-            // TODO: currently this returns NULL for unimplemented host methods
+            // Unimplemented method
             return IMP::guest_null();
         }
         class = next;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_class(
+        objc: &mut ObjC,
+        mem: &mut Mem,
+        name: &str,
+        superclass: Class,
+        instance_start: GuestUSize,
+        instance_size: GuestUSize,
+        ivars: Vec<(&str, GuestUSize, u32)>, // name, initial offset, alignment
+    ) -> (Class, HashMap<String, ConstPtr<GuestUSize>>) {
+        let mut cls_ptr: Class = mem.alloc(guest_size_of::<objc_object>()).cast();
+        if cls_ptr.is_null() {
+            cls_ptr = mem.alloc(guest_size_of::<objc_object>()).cast();
+        }
+        assert!(!cls_ptr.is_null());
+        mem.write(cls_ptr, objc_object { isa: cls_ptr });
+
+        let mut ivar_map = HashMap::new();
+        let mut offset_ptrs = HashMap::new();
+        for (ivar_name, initial_offset, align) in ivars {
+            let offset_ptr: MutPtr<GuestUSize> = mem.alloc(4).cast();
+            assert!(!offset_ptr.is_null());
+            mem.write(offset_ptr, initial_offset);
+            let const_ptr = offset_ptr.cast_const();
+            ivar_map.insert(ivar_name.to_string(), (const_ptr, align, None));
+            offset_ptrs.insert(ivar_name.to_string(), const_ptr);
+        }
+
+        let host_obj = Box::new(ClassHostObject {
+            name: name.to_string(),
+            is_metaclass: false,
+            superclass,
+            methods: HashMap::new(),
+            guest_method_signatures: HashMap::new(),
+            instance_start,
+            instance_size,
+            ivars: ivar_map,
+            is_initialized: InitializationStatus::NotInitialized,
+        });
+
+        objc.register_static_object(cls_ptr, host_obj);
+        objc.classes.insert(name.to_string(), cls_ptr);
+        (cls_ptr, offset_ptrs)
+    }
+
+    #[test]
+    fn test_ivar_reconciliation_slides_guest_memory_not_host_pointer() {
+        let mut mem = Mem::new();
+        let mut objc = ObjC::new();
+
+        let (super_cls, _super_ptrs) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "SuperClass",
+            nil,
+            4,
+            12,
+            vec![("ivarA", 4, 4), ("ivarB", 8, 4)],
+        );
+
+        let (sub_cls, sub_ptrs) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "SubClass",
+            super_cls,
+            8,
+            16,
+            vec![("subIvar1", 8, 4), ("subIvar2", 12, 4)],
+        );
+
+        let orig_x_ptr = sub_ptrs["subIvar1"];
+        let orig_y_ptr = sub_ptrs["subIvar2"];
+
+        assert_eq!(mem.read(orig_x_ptr), 8);
+        assert_eq!(mem.read(orig_y_ptr), 12);
+
+        let (need, diff) = objc.need_ivar_reconciliation(sub_cls);
+        assert_eq!(need, true);
+        assert_eq!(diff, 4);
+
+        objc.reconcile_ivars_for_class(sub_cls, &mut mem);
+
+        let host_obj = objc.borrow::<ClassHostObject>(sub_cls);
+        assert_eq!(host_obj.instance_start, 12);
+        assert_eq!(host_obj.instance_size, 20);
+
+        // Host pointers in ClassHostObject.ivars must NOT change
+        assert_eq!(host_obj.ivars["subIvar1"].0, orig_x_ptr);
+        assert_eq!(host_obj.ivars["subIvar2"].0, orig_y_ptr);
+
+        // Guest memory AT the pointers must have slid by diff=4
+        assert_eq!(mem.read(orig_x_ptr), 12);
+        assert_eq!(mem.read(orig_y_ptr), 16);
+
+        // Verify object_lookup_ivar retrieves non-overlapping addresses
+        let instance: id = mem.alloc(20).cast();
+        mem.write(instance, objc_object { isa: sub_cls });
+
+        let (ptr_a, _) = objc.object_lookup_ivar(&mem, instance, "ivarA").unwrap();
+        let (ptr_b, _) = objc.object_lookup_ivar(&mem, instance, "ivarB").unwrap();
+        let (ptr_1, _) = objc.object_lookup_ivar(&mem, instance, "subIvar1").unwrap();
+        let (ptr_2, _) = objc.object_lookup_ivar(&mem, instance, "subIvar2").unwrap();
+
+        assert_eq!(ptr_a.to_bits(), instance.to_bits() + 4);
+        assert_eq!(ptr_b.to_bits(), instance.to_bits() + 8);
+        assert_eq!(ptr_1.to_bits(), instance.to_bits() + 12);
+        assert_eq!(ptr_2.to_bits(), instance.to_bits() + 16);
+    }
+
+    #[test]
+    fn test_maplestory_status_panel_passive_skills_pane_skill_cell_layout() {
+        let mut mem = Mem::new();
+        let mut objc = ObjC::new();
+
+        // 1. UIViewController (base)
+        let (uiviewcontroller_cls, _) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "UIViewController",
+            nil,
+            4,
+            0x98,
+            vec![],
+        );
+
+        // 2. InventoryViewController: superclass UIViewController, size 0xa4
+        let (inv_view_cls, inv_ptrs) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "InventoryViewController",
+            uiviewcontroller_cls,
+            0x98,
+            0xa4,
+            vec![
+                ("itemCell", 0x98, 4),
+                ("equipmentCell", 0x9c, 4),
+                ("skillCell", 0xa0, 4),
+            ],
+        );
+
+        // 3. PassiveSkillsPane: superclass InventoryViewController
+        // Compiled with instance_start=0x98, instance_size=0xb0
+        let (passive_cls, passive_ptrs) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "PassiveSkillsPane",
+            inv_view_cls,
+            0x98,
+            0xb0,
+            vec![
+                ("panel", 0x98, 4),
+                ("skillListView", 0x9c, 4),
+                ("allSkillNames", 0xa0, 4),
+                ("selectedCell", 0xa4, 4),
+                ("selectedSkill", 0xa8, 4),
+                ("confirmPanel", 0xac, 4),
+            ],
+        );
+
+        // 4. ActiveSkillsPane: superclass InventoryViewController
+        let (active_cls, active_ptrs) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "ActiveSkillsPane",
+            inv_view_cls,
+            0x98,
+            0xa4,
+            vec![
+                ("panel", 0x98, 4),
+                ("selectedSkillView", 0x9c, 4),
+                ("skillListView", 0xa0, 4),
+            ],
+        );
+
+        // 5. StatusPane: superclass InventoryViewController
+        let (status_pane_cls, status_pane_ptrs) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "StatusPane",
+            inv_view_cls,
+            0x98,
+            0xd0,
+            vec![
+                ("panel", 0x98, 4),
+                ("statusPaneBackgournd", 0x9c, 4),
+                ("portraitView", 0xa0, 4),
+            ],
+        );
+
+        // 6. InventoryCell (superclass of SkillCell)
+        let (inv_cell_cls, inv_cell_ptrs) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "InventoryCell",
+            nil,
+            0xf4,
+            0x104,
+            vec![
+                ("displayName", 0xf4, 4),
+                ("iconView", 0xf8, 4),
+                ("panel", 0xfc, 4),
+                ("dimmerView_", 0x100, 4),
+            ],
+        );
+
+        // 7. SkillCell: superclass InventoryCell
+        let (skill_cell_cls, skill_cell_ptrs) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "SkillCell",
+            inv_cell_cls,
+            0x100,
+            0x108,
+            vec![
+                ("descriptionView", 0x100, 4),
+                ("useButton", 0x104, 4),
+            ],
+        );
+
+        // Reconcile PassiveSkillsPane
+        objc.reconcile_ivars_for_class(passive_cls, &mut mem);
+        assert_eq!(mem.read(passive_ptrs["panel"]), 0xa4);
+        assert_eq!(mem.read(passive_ptrs["skillListView"]), 0xa8);
+        assert_eq!(mem.read(passive_ptrs["allSkillNames"]), 0xac);
+        assert_eq!(mem.read(passive_ptrs["selectedCell"]), 0xb0);
+        assert_eq!(mem.read(passive_ptrs["selectedSkill"]), 0xb4);
+        assert_eq!(mem.read(passive_ptrs["confirmPanel"]), 0xb8);
+
+        // Crucial verification: allSkillNames (0xac) must NOT collide with skillCell (0xa0)
+        let skill_cell_offset = mem.read(inv_ptrs["skillCell"]);
+        let all_skill_names_offset = mem.read(passive_ptrs["allSkillNames"]);
+        assert_eq!(skill_cell_offset, 0xa0);
+        assert_eq!(all_skill_names_offset, 0xac);
+        assert_ne!(skill_cell_offset, all_skill_names_offset, "allSkillNames and skillCell must not collide");
+
+        // Reconcile ActiveSkillsPane
+        objc.reconcile_ivars_for_class(active_cls, &mut mem);
+        assert_eq!(mem.read(active_ptrs["panel"]), 0xa4);
+        assert_eq!(mem.read(active_ptrs["selectedSkillView"]), 0xa8);
+        assert_eq!(mem.read(active_ptrs["skillListView"]), 0xac);
+        assert_ne!(mem.read(active_ptrs["skillListView"]), skill_cell_offset, "ActiveSkillsPane.skillListView must not collide with skillCell");
+
+        // Reconcile StatusPane
+        objc.reconcile_ivars_for_class(status_pane_cls, &mut mem);
+        assert_eq!(mem.read(status_pane_ptrs["portraitView"]), 0xac);
+        assert_ne!(mem.read(status_pane_ptrs["portraitView"]), skill_cell_offset, "StatusPane.portraitView must not collide with skillCell");
+
+        // Reconcile SkillCell
+        objc.reconcile_ivars_for_class(skill_cell_cls, &mut mem);
+        let dimmer_view_offset = mem.read(inv_cell_ptrs["dimmerView_"]);
+        let description_view_offset = mem.read(skill_cell_ptrs["descriptionView"]);
+        let use_button_offset = mem.read(skill_cell_ptrs["useButton"]);
+        assert_eq!(dimmer_view_offset, 0x100);
+        assert_eq!(description_view_offset, 0x104);
+        assert_eq!(use_button_offset, 0x108);
+        assert_ne!(description_view_offset, dimmer_view_offset, "SkillCell.descriptionView must not collide with dimmerView_");
+
+        // 8. StatusPanel: superclass UIViewController
+        // Compiled with instance_start=0x98, instance_size=0xc0
+        let (status_panel_cls, status_panel_ptrs) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "StatusPanel",
+            uiviewcontroller_cls,
+            0x98,
+            0xc0,
+            vec![
+                ("statusPane", 0x98, 4),
+                ("activeSkillsPane", 0x9c, 4),
+                ("passiveSkillsPane", 0xa0, 4),
+                ("backButton", 0xa4, 4),
+                ("goldLabel", 0xa8, 4),
+                ("tabButtons", 0xac, 4),
+                ("selectedTab", 0xb0, 4),
+                ("panes", 0xb4, 4),
+                ("currentPane", 0xb8, 4),
+                ("panelMode", 0xbc, 4),
+            ],
+        );
+
+        // Reconcile StatusPanel
+        objc.reconcile_ivars_for_class(status_panel_cls, &mut mem);
+        assert_eq!(mem.read(status_panel_ptrs["statusPane"]), 0x98);
+        assert_eq!(mem.read(status_panel_ptrs["activeSkillsPane"]), 0x9c);
+        assert_eq!(mem.read(status_panel_ptrs["passiveSkillsPane"]), 0xa0);
+        assert_eq!(mem.read(status_panel_ptrs["backButton"]), 0xa4);
+        assert_eq!(mem.read(status_panel_ptrs["goldLabel"]), 0xa8);
+        assert_eq!(mem.read(status_panel_ptrs["tabButtons"]), 0xac);
+        assert_eq!(mem.read(status_panel_ptrs["selectedTab"]), 0xb0);
+        assert_eq!(mem.read(status_panel_ptrs["panes"]), 0xb4);
+        assert_eq!(mem.read(status_panel_ptrs["currentPane"]), 0xb8);
+        assert_eq!(mem.read(status_panel_ptrs["panelMode"]), 0xbc);
+
+        // Test object_lookup_ivar on an instance of StatusPanel
+        let status_panel_inst: id = mem.alloc(0xc0).cast();
+        mem.write(status_panel_inst, objc_object { isa: status_panel_cls });
+
+        let (p_back_button, _) = objc.object_lookup_ivar(&mem, status_panel_inst, "backButton").unwrap();
+        let (p_passive_skills_pane, _) = objc.object_lookup_ivar(&mem, status_panel_inst, "passiveSkillsPane").unwrap();
+        let (p_panel_mode, _) = objc.object_lookup_ivar(&mem, status_panel_inst, "panelMode").unwrap();
+        assert_eq!(p_back_button.to_bits(), status_panel_inst.to_bits() + 0xa4);
+        assert_eq!(p_passive_skills_pane.to_bits(), status_panel_inst.to_bits() + 0xa0);
+        assert_eq!(p_panel_mode.to_bits(), status_panel_inst.to_bits() + 0xbc);
+
+        // Verify sliding of StatusPanel if UIViewController grows (e.g. from 0x98 to 0xa0, diff = 8)
+        let (grown_uivc_cls, _) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "GrownUIViewController",
+            nil,
+            4,
+            0xa0,
+            vec![],
+        );
+        let (sliding_status_panel_cls, sliding_ptrs) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "SlidingStatusPanel",
+            grown_uivc_cls,
+            0x98,
+            0xc0,
+            vec![
+                ("statusPane", 0x98, 4),
+                ("backButton", 0xa4, 4),
+                ("panelMode", 0xbc, 4),
+            ],
+        );
+        objc.reconcile_ivars_for_class(sliding_status_panel_cls, &mut mem);
+        assert_eq!(mem.read(sliding_ptrs["statusPane"]), 0xa0);
+        assert_eq!(mem.read(sliding_ptrs["backButton"]), 0xac);
+        assert_eq!(mem.read(sliding_ptrs["panelMode"]), 0xc4);
+    }
+
+    #[test]
+    fn test_multi_level_ivar_sliding() {
+        let mut mem = Mem::new();
+        let mut objc = ObjC::new();
+
+        let (root_cls, _) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "Root",
+            nil,
+            4,
+            8,
+            vec![("root_ivar", 4, 4)],
+        );
+
+        let (mid_cls, mid_ptrs) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "Mid",
+            root_cls,
+            4,
+            12,
+            vec![("mid_ivar", 4, 4)],
+        );
+
+        let (leaf_cls, leaf_ptrs) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "Leaf",
+            mid_cls,
+            8,
+            16,
+            vec![("leaf_ivar", 8, 4)],
+        );
+
+        // Slide Mid against Root: diff = 8 - 4 = 4
+        objc.reconcile_ivars_for_class(mid_cls, &mut mem);
+        assert_eq!(mem.read(mid_ptrs["mid_ivar"]), 8);
+        assert_eq!(objc.borrow::<ClassHostObject>(mid_cls).instance_size, 16);
+
+        // Slide Leaf against Mid: Leaf was compiled with start 8, but Mid size is now 16!
+        // diff = 16 - 8 = 8
+        objc.reconcile_ivars_for_class(leaf_cls, &mut mem);
+        assert_eq!(mem.read(leaf_ptrs["leaf_ivar"]), 16);
+        assert_eq!(objc.borrow::<ClassHostObject>(leaf_cls).instance_size, 24);
+    }
+
+    #[test]
+    fn test_ivar_reconciliation_alignment() {
+        let mut mem = Mem::new();
+        let mut objc = ObjC::new();
+
+        let (super_cls, _) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "SuperAlign",
+            nil,
+            4,
+            9, // odd size, diff = 9 - 8 = 1
+            vec![],
+        );
+
+        let (sub_cls, sub_ptrs) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "SubAlign",
+            super_cls,
+            8,
+            16,
+            vec![("aligned_ivar", 8, 4)], // alignment 4 requires diff to align to 4
+        );
+
+        objc.reconcile_ivars_for_class(sub_cls, &mut mem);
+
+        // Diff 1 aligned to mask 3 -> 4
+        // Slid offset = 8 + 4 = 12
+        assert_eq!(mem.read(sub_ptrs["aligned_ivar"]), 12);
+        assert_eq!(objc.borrow::<ClassHostObject>(sub_cls).instance_start, 12);
+        assert_eq!(objc.borrow::<ClassHostObject>(sub_cls).instance_size, 20);
+    }
+
+    #[test]
+    fn test_maplestory_battle_scene_odd_size_alignment() {
+        let mut mem = Mem::new();
+        let mut objc = ObjC::new();
+
+        // MDBattleScene in MapleStory has odd size 0xf9 (249)
+        let (battle_scene_cls, _) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "MDBattleScene",
+            nil,
+            4,
+            0xf9,
+            vec![],
+        );
+
+        // MDNBattleScene was compiled with instance_start=0xf4 (244) and has 4-byte aligned ivars
+        // Raw diff = 0xf9 - 0xf4 = 5.
+        // Because ivars have 4-byte alignment, diff must align from 5 to 8, NOT to 6!
+        let (nbattle_scene_cls, nbattle_ptrs) = create_test_class(
+            &mut objc,
+            &mut mem,
+            "MDNBattleScene",
+            battle_scene_cls,
+            0xf4,
+            0x10c,
+            vec![
+                ("peMonsterCharge", 0xf4, 4),
+                ("peMonsterHeal", 0xf8, 4),
+                ("isSecondAttack", 0xfc, 1),
+                ("currentAttack", 0x100, 4),
+            ],
+        );
+
+        objc.reconcile_ivars_for_class(nbattle_scene_cls, &mut mem);
+
+        // Diff 5 aligned to 4 bytes => 8!
+        // 0xf4 + 8 = 0xfc (252, which is 4-byte aligned)
+        assert_eq!(mem.read(nbattle_ptrs["peMonsterCharge"]), 0xfc);
+        assert_eq!(mem.read(nbattle_ptrs["peMonsterCharge"]) % 4, 0, "peMonsterCharge must be 4-byte aligned");
+        assert_eq!(mem.read(nbattle_ptrs["peMonsterHeal"]), 0x100);
+        assert_eq!(mem.read(nbattle_ptrs["currentAttack"]), 0x108);
+        assert_eq!(objc.borrow::<ClassHostObject>(nbattle_scene_cls).instance_start, 0xfc);
     }
 }

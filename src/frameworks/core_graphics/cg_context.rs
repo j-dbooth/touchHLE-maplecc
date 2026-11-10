@@ -106,7 +106,7 @@ pub fn CGContextRetain(env: &mut Environment, c: CGContextRef) -> CGContextRef {
     }
 }
 
-fn CGContextSetBlendMode(env: &mut Environment, context: CGContextRef, blend_mode: CGBlendMode) {
+pub fn CGContextSetBlendMode(env: &mut Environment, context: CGContextRef, blend_mode: CGBlendMode) {
     env.objc
         .borrow_mut::<CGContextHostObject>(context)
         .blend_mode = blend_mode;
@@ -268,7 +268,7 @@ pub fn CGContextDrawImage(
     cg_bitmap_context::draw_image(env, context, rect, image);
 }
 
-fn CGContextSaveGState(env: &mut Environment, context: CGContextRef) {
+pub fn CGContextSaveGState(env: &mut Environment, context: CGContextRef) {
     let host_obj = env.objc.borrow_mut::<CGContextHostObject>(context);
     host_obj.state_stack.push((
         host_obj.rgb_fill_color,
@@ -280,7 +280,7 @@ fn CGContextSaveGState(env: &mut Environment, context: CGContextRef) {
     CGFontRetain(env, env.objc.borrow::<CGContextHostObject>(context).font);
 }
 
-fn CGContextRestoreGState(env: &mut Environment, context: CGContextRef) {
+pub fn CGContextRestoreGState(env: &mut Environment, context: CGContextRef) {
     // We need to release _old_ font, there are 2 cases:
     // - font hasn't been set between save/restore -> this release corresponds
     // the font retain from save

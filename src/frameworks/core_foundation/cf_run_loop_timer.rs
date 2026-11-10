@@ -71,7 +71,7 @@ fn CFRunLoopTimerCreate(
     let target: id = msg_class![env; _touchHLE_CFTimerTarget alloc];
     let target: id = msg![env; target initWithCallout:callout info:info];
 
-    let selector = env.objc.lookup_selector("timerFireMethod:").unwrap();
+    let selector = env.objc.register_host_selector("timerFireMethod:".to_string(), &mut env.mem);
 
     let repeats = interval > 0.0;
     msg_class![env; NSTimer timerWithTimeInterval:interval

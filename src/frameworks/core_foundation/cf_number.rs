@@ -118,6 +118,19 @@ fn CFBooleanGetValue(env: &mut Environment, boolean: CFBooleanRef) -> bool {
     msg![env; boolean boolValue]
 }
 
+fn CFNumberGetType(env: &mut Environment, number: CFNumberRef) -> CFNumberType {
+    use crate::frameworks::foundation::ns_value::NSNumberHostObject;
+    let host = env.objc.borrow::<NSNumberHostObject>(number);
+    match host {
+        NSNumberHostObject::Char(_) | NSNumberHostObject::Bool(_) => kCFNumberCharType,
+        NSNumberHostObject::Short(_) | NSNumberHostObject::UnsignedShort(_) => kCFNumberShortType,
+        NSNumberHostObject::Int(_) | NSNumberHostObject::UnsignedInt(_) => kCFNumberIntType,
+        NSNumberHostObject::LongLong(_) | NSNumberHostObject::UnsignedLongLong(_) => kCFNumberLongLongType,
+        NSNumberHostObject::Float(_) => kCFNumberFloatType,
+        NSNumberHostObject::Double(_) => kCFNumberDoubleType,
+    }
+}
+
 pub const CONSTANTS: ConstantExports = &[
     (
         "_kCFBooleanFalse",
@@ -142,6 +155,8 @@ pub const CONSTANTS: ConstantExports = &[
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CFNumberCreate(_, _, _)),
     export_c_func!(CFNumberGetValue(_, _, _)),
+    export_c_func!(CFNumberGetType(_)),
     export_c_func!(CFNumberCompare(_, _, _)),
     export_c_func!(CFBooleanGetValue(_)),
 ];
+

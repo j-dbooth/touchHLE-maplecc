@@ -63,16 +63,37 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (id)initWithCoder:(id)coder {
     let this: id = msg_super![env; this initWithCoder:coder];
 
-    // TODO: Decode other property values from the coder
-    () = msg![env; this setFont:nil];
+    let font_key = get_static_str(env, "UIFont");
+    let font: id = msg![env; coder decodeObjectForKey:font_key];
+    () = msg![env; this setFont:font];
 
     let key_ns_string = get_static_str(env, "UIText");
     let text: id = msg![env; coder decodeObjectForKey:key_ns_string];
     () = msg![env; this setText:text];
 
-    let key_ns_string = get_static_str(env, "UITextColor");
-    let text_color: id = msg![env; coder decodeObjectForKey:key_ns_string];
+    let color_key = get_static_str(env, "UIColor");
+    let text_color_key = get_static_str(env, "UITextColor");
+    let text_color: id = msg![env; coder decodeObjectForKey:color_key];
+    let text_color = if text_color == nil {
+        msg![env; coder decodeObjectForKey:text_color_key]
+    } else {
+        text_color
+    };
     () = msg![env; this setTextColor:text_color];
+
+    let align_key = get_static_str(env, "UITextAlignment");
+    let align: NSInteger = msg![env; coder decodeIntegerForKey:align_key];
+    () = msg![env; this setTextAlignment:align];
+
+    let lbm_key = get_static_str(env, "UILineBreakMode");
+    let lbm: NSInteger = msg![env; coder decodeIntegerForKey:lbm_key];
+    () = msg![env; this setLineBreakMode:lbm];
+
+    let nol_key = get_static_str(env, "UINumberOfLines");
+    let nol: NSInteger = msg![env; coder decodeIntegerForKey:nol_key];
+    if nol != 0 {
+        () = msg![env; this setNumberOfLines:nol];
+    }
 
     let key_ns_string = get_static_str(env, "UIBackgroundColor");
     let bg_color: id = msg![env; coder decodeObjectForKey:key_ns_string];
@@ -93,6 +114,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (id)initWithFrame:(CGRect)frame {
     let this: id = msg_super![env; this initWithFrame:frame];
+    () = msg![env; this setUserInteractionEnabled:false];
     // These aren't redundant, the setters fetch the real defaults.
     () = msg![env; this setFont:nil];
     () = msg![env; this setTextColor:nil];
@@ -156,16 +178,6 @@ pub const CLASSES: ClassExports = objc_classes! {
     () = msg![env; this setNeedsDisplay];
 }
 
-- (bool)adjustsFontSizeToFitWidth {
-    false // default value
-}
-- (())setAdjustsFontSizeToFitWidth:(bool)adjusts {
-    assert!(!adjusts); // TODO
-}
-
-- (())setMinimumFontSize:(CGFloat)size {
-    todo_objc_setter!(this, size);
-}
 
 - (id)textColor {
     env.objc.borrow::<UILabelHostObject>(this).text_color
@@ -242,6 +254,37 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (())setBaselineAdjustment:(UIBaselineAdjustment)value {
     todo_objc_setter!(this, value);
 }
+- (UIBaselineAdjustment)baselineAdjustment {
+    0
+}
+
+- (())setMinimumFontSize:(f32)size {
+    todo_objc_setter!(this, size);
+}
+- (f32)minimumFontSize {
+    0.0
+}
+
+- (())setAdjustsFontSizeToFitWidth:(bool)adjusts {
+    todo_objc_setter!(this, adjusts);
+}
+- (bool)adjustsFontSizeToFitWidth {
+    false
+}
+
+- (())setHighlightedTextColor:(id)color {
+    todo_objc_setter!(this, color);
+}
+- (id)highlightedTextColor {
+    nil
+}
+
+- (())setHighlighted:(bool)highlighted {
+    todo_objc_setter!(this, highlighted);
+}
+- (bool)isHighlighted {
+    false
+}
 
 - (())drawRect:(CGRect)_rect {
     let bounds: CGRect = msg![env; this bounds];
@@ -307,6 +350,21 @@ pub const CLASSES: ClassExports = objc_classes! {
                     lineBreakMode:line_break_mode
                         alignment:text_alignment]
     };
+}
+
+- (CGSize)sizeThatFits:(CGSize)size {
+    let text = env.objc.borrow::<UILabelHostObject>(this).text;
+    let font = env.objc.borrow::<UILabelHostObject>(this).font;
+    let number_of_lines = env.objc.borrow::<UILabelHostObject>(this).number_of_lines;
+    let line_break_mode = env.objc.borrow::<UILabelHostObject>(this).line_break_mode;
+    if text == nil || font == nil {
+        return CGSize::default();
+    }
+    if number_of_lines == 1 {
+        msg![env; text sizeWithFont:font]
+    } else {
+        msg![env; text sizeWithFont:font constrainedToSize:size lineBreakMode:line_break_mode]
+    }
 }
 
 @end

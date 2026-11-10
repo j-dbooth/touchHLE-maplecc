@@ -5,7 +5,7 @@
  */
 //! `NSNull`.
 
-use crate::objc::{id, objc_classes, ClassExports, TrivialHostObject};
+use crate::objc::{id, msg_class, objc_classes, ClassExports, NSZonePtr, TrivialHostObject};
 
 #[derive(Default)]
 pub struct State {
@@ -19,6 +19,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 // This is a singleton that takes the place of nil in collections which don't
 // allow that value.
 @implementation NSNull: NSObject
+
++ (id)allocWithZone:(NSZonePtr)_zone {
+    msg_class![env; NSNull null]
+}
 
 + (id)null {
     if let Some(null) = env.framework_state.foundation.ns_null.null {
@@ -37,6 +41,13 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (id)retain { this }
 - (())release {}
 - (id)autorelease { this }
+
+// NSCoding implementation
+- (())encodeWithCoder:(id)_coder {}
+- (id)initWithCoder:(id)_coder { this }
+
+// NSCopying implementation
+- (id)copyWithZone:(NSZonePtr)_zone { this }
 
 @end
 

@@ -12,7 +12,7 @@
 use super::UIViewHostObject;
 use crate::dyld::{ConstantExports, HostConstant};
 use crate::frameworks::core_graphics::cg_affine_transform::CGAffineTransform;
-use crate::frameworks::core_graphics::{CGPoint, CGRect};
+use crate::frameworks::core_graphics::{CGFloat, CGPoint, CGRect};
 use crate::frameworks::foundation::ns_string;
 use crate::frameworks::uikit::ui_application::{
     UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight,
@@ -130,12 +130,23 @@ pub const CLASSES: ClassExports = objc_classes! {
     () = msg![env; this setHidden:false];
 }
 
+- (id)window {
+    this
+}
+
 // We only model the single main screen
 - (id)screen {
     msg_class![env; UIScreen mainScreen]
 }
 - (())setScreen:(id)screen {
     log_dbg!("[(UIWindow*){:?} setScreen:{:?}]", this, screen);
+}
+
+- (CGFloat)windowLevel {
+    0.0
+}
+- (())setWindowLevel:(CGFloat)level {
+    log_dbg!("[(UIWindow*){:?} setWindowLevel:{}]", this, level);
 }
 
 // UIResponder implementation

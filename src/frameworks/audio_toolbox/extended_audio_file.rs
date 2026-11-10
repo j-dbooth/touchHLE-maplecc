@@ -11,7 +11,8 @@
 
 use super::audio_file::{
     kAudioFileBadPropertySizeError, kAudioFilePropertyDataFormat, kAudioFileReadPermission,
-    property_size, AudioFileClose, AudioFileGetProperty, AudioFileID, AudioFileOpenURL,
+    kAudioFileUnsupportedFileTypeError, kAudioFileUnsupportedPropertyError,
+    kAudioFileUnspecifiedError, AudioFileClose, AudioFileGetProperty, AudioFileID, AudioFileOpenURL,
     AudioFileReadBytes,
 };
 use super::audio_queue::is_supported_audio_format;
@@ -54,6 +55,7 @@ type ExtAudioFileRef = MutPtr<OpaqueExtAudioFile>;
 /// Usually a FourCC.
 type ExtAudioFilePropertyID = u32;
 const kExtAudioFileProperty_FileDataFormat: ExtAudioFilePropertyID = fourcc(b"ffmt");
+const kExtAudioFileProperty_FileLengthFrames: ExtAudioFilePropertyID = fourcc(b"#frm");
 const kExtAudioFileProperty_ClientDataFormat: ExtAudioFilePropertyID = fourcc(b"cfmt");
 
 fn ExtAudioFileOpenURL(
@@ -110,36 +112,95 @@ fn ExtAudioFileGetProperty(
     out_property_data: MutVoidPtr,
 ) -> OSStatus {
     return_if_null!(in_ext_audio_file);
+    return_if_null!(io_property_data_size);
 
-    let audio_file_property_id = match in_property_id {
-        kExtAudioFileProperty_FileDataFormat => kAudioFilePropertyDataFormat,
-        _ => unimplemented!(
-            "Unimplemented property ID: {}",
-            debug_fourcc(in_property_id)
-        ),
+    let (guest_audio_file, client_data_format) = {
+        let host_object = match env
+            .framework_state
+            .audio_toolbox
+            .extended_audio_file
+            .extended_audio_files
+            .get(&in_ext_audio_file)
+        {
+            Some(obj) => obj,
+            None => return kAudioFileUnspecifiedError,
+        };
+        (host_object.guest_audio_file, host_object.client_data_format)
     };
 
-    let required_size = property_size(audio_file_property_id);
-    if env.mem.read(io_property_data_size) != required_size {
-        log!("Warning: ExtAudioFileGetProperty() failed");
-        return kAudioFileBadPropertySizeError;
+    match in_property_id {
+        kExtAudioFileProperty_FileDataFormat => {
+            let required_size = guest_size_of::<AudioStreamBasicDescription>();
+            if env.mem.read(io_property_data_size) < required_size {
+                log!("Warning: ExtAudioFileGetProperty(kExtAudioFileProperty_FileDataFormat) failed: bad property size");
+                return kAudioFileBadPropertySizeError;
+            }
+            env.mem.write(io_property_data_size, required_size);
+            AudioFileGetProperty(
+                env,
+                guest_audio_file,
+                kAudioFilePropertyDataFormat,
+                io_property_data_size,
+                out_property_data,
+            )
+        }
+        kExtAudioFileProperty_FileLengthFrames => {
+            let required_size = guest_size_of::<i64>();
+            if env.mem.read(io_property_data_size) < required_size {
+                log!("Warning: ExtAudioFileGetProperty(kExtAudioFileProperty_FileLengthFrames) failed: bad property size");
+                return kAudioFileBadPropertySizeError;
+            }
+            let audio_file_host_object = match env
+                .framework_state
+                .audio_toolbox
+                .audio_file
+                .audio_files
+                .get(&guest_audio_file)
+            {
+                Some(obj) => obj,
+                None => return kAudioFileUnspecifiedError,
+            };
+            let desc = audio_file_host_object.audio_file.audio_description();
+            let frames_per_packet = (desc.frames_per_packet as u64).max(1);
+            let packet_count = audio_file_host_object.audio_file.packet_count();
+            let total_frames = (packet_count * frames_per_packet) as i64;
+            if !out_property_data.is_null() {
+                env.mem.write(out_property_data.cast(), total_frames);
+            }
+            env.mem.write(io_property_data_size, required_size);
+            0 // success
+        }
+        kExtAudioFileProperty_ClientDataFormat => {
+            let required_size = guest_size_of::<AudioStreamBasicDescription>();
+            if env.mem.read(io_property_data_size) < required_size {
+                log!("Warning: ExtAudioFileGetProperty(kExtAudioFileProperty_ClientDataFormat) failed: bad property size");
+                return kAudioFileBadPropertySizeError;
+            }
+            if let Some(client_desc) = client_data_format {
+                if !out_property_data.is_null() {
+                    env.mem.write(out_property_data.cast(), client_desc);
+                }
+                env.mem.write(io_property_data_size, required_size);
+                0 // success
+            } else {
+                env.mem.write(io_property_data_size, required_size);
+                AudioFileGetProperty(
+                    env,
+                    guest_audio_file,
+                    kAudioFilePropertyDataFormat,
+                    io_property_data_size,
+                    out_property_data,
+                )
+            }
+        }
+        _ => {
+            log!(
+                "Warning: ExtAudioFileGetProperty() unimplemented property ID: {}",
+                debug_fourcc(in_property_id)
+            );
+            kAudioFileUnsupportedPropertyError
+        }
     }
-
-    let host_object = env
-        .framework_state
-        .audio_toolbox
-        .extended_audio_file
-        .extended_audio_files
-        .get(&in_ext_audio_file)
-        .unwrap();
-
-    AudioFileGetProperty(
-        env,
-        host_object.guest_audio_file,
-        audio_file_property_id,
-        io_property_data_size,
-        out_property_data,
-    )
 }
 
 fn ExtAudioFileSetProperty(
@@ -150,49 +211,73 @@ fn ExtAudioFileSetProperty(
     in_property_data: ConstVoidPtr,
 ) -> OSStatus {
     return_if_null!(in_ext_audio_file);
+    return_if_null!(in_property_data);
 
-    assert_eq!(in_property_id, kExtAudioFileProperty_ClientDataFormat);
-    assert_eq!(
-        in_property_data_size,
-        guest_size_of::<AudioStreamBasicDescription>()
-    );
+    if in_property_id != kExtAudioFileProperty_ClientDataFormat {
+        log!(
+            "Warning: ExtAudioFileSetProperty() unimplemented property ID: {}",
+            debug_fourcc(in_property_id)
+        );
+        return kAudioFileUnsupportedPropertyError;
+    }
+
+    if in_property_data_size != guest_size_of::<AudioStreamBasicDescription>() {
+        log!("Warning: ExtAudioFileSetProperty(ClientDataFormat) bad size");
+        return kAudioFileBadPropertySizeError;
+    }
 
     let audio_desc_ptr: ConstPtr<AudioStreamBasicDescription> = in_property_data.cast();
     let client_audio_desc = env.mem.read(audio_desc_ptr);
     log_dbg!("ExtAudioFileSetProperty {:?}", client_audio_desc);
     let format_id = client_audio_desc.format_id;
-    assert_eq!(format_id, kAudioFormatLinearPCM);
-    assert!(is_supported_audio_format(&client_audio_desc));
+    if format_id != kAudioFormatLinearPCM || !is_supported_audio_format(&client_audio_desc) {
+        log!(
+            "Warning: ExtAudioFileSetProperty unsupported audio format {:?}",
+            client_audio_desc
+        );
+        return kAudioFileUnsupportedFileTypeError;
+    }
 
-    let host_object = env
-        .framework_state
-        .audio_toolbox
-        .extended_audio_file
-        .extended_audio_files
-        .get_mut(&in_ext_audio_file)
-        .unwrap();
-    assert!(host_object.client_data_format.is_none());
-    host_object.client_data_format = Some(client_audio_desc);
+    let (guest_audio_file, had_client_format) = {
+        let host_object = match env
+            .framework_state
+            .audio_toolbox
+            .extended_audio_file
+            .extended_audio_files
+            .get_mut(&in_ext_audio_file)
+        {
+            Some(obj) => {
+                let had_format = obj.client_data_format.is_some();
+                obj.client_data_format = Some(client_audio_desc);
+                (obj.guest_audio_file, had_format)
+            }
+            None => return kAudioFileUnspecifiedError,
+        };
+        host_object
+    };
 
-    let host_object = env
-        .framework_state
-        .audio_toolbox
-        .extended_audio_file
-        .extended_audio_files
-        .get(&in_ext_audio_file)
-        .unwrap();
+    if had_client_format {
+        log!("Warning: ExtAudioFileSetProperty client data format was already set, overwriting");
+    }
+
     let other_host_object = env
         .framework_state
         .audio_toolbox
         .audio_file
         .audio_files
-        .get(&host_object.guest_audio_file)
+        .get(&guest_audio_file)
         .unwrap();
     let audio_desc = AudioStreamBasicDescription::from_audio_description(
         other_host_object.audio_file.audio_description(),
     );
     // TODO: support audio format conversions
-    assert_eq!(audio_desc, client_audio_desc);
+    if audio_desc != client_audio_desc {
+        log!(
+            "Warning: ExtAudioFileSetProperty client format {:?} does not match file format {:?}, format conversion is not yet fully supported",
+            client_audio_desc,
+            audio_desc
+        );
+    }
 
     0 // success
 }
@@ -204,25 +289,57 @@ fn ExtAudioFileRead(
     io_data: MutPtr<AudioBufferList<1>>,
 ) -> OSStatus {
     return_if_null!(in_ext_audio_file);
+    return_if_null!(io_number_frames);
+    return_if_null!(io_data);
 
     let mut audio_buffer_list = env.mem.read(io_data);
     let num_buffers = audio_buffer_list.number_buffers;
-    assert_eq!(num_buffers, 1);
+    if num_buffers != 1 {
+        log!(
+            "Warning: ExtAudioFileRead() unsupported number of buffers: {}",
+            num_buffers
+        );
+        return kAudioFileUnspecifiedError;
+    }
 
-    let host_object = env
+    let host_object = match env
         .framework_state
         .audio_toolbox
         .extended_audio_file
         .extended_audio_files
         .get(&in_ext_audio_file)
-        .unwrap();
+    {
+        Some(obj) => obj,
+        None => return kAudioFileUnspecifiedError,
+    };
 
-    audio_buffer_list.buffers[0].number_channels =
-        host_object.client_data_format.unwrap().channels_per_frame;
+    let client_data_format = match host_object.client_data_format {
+        Some(desc) => desc,
+        None => {
+            let other_host_object = env
+                .framework_state
+                .audio_toolbox
+                .audio_file
+                .audio_files
+                .get(&host_object.guest_audio_file)
+                .unwrap();
+            AudioStreamBasicDescription::from_audio_description(
+                other_host_object.audio_file.audio_description(),
+            )
+        }
+    };
+
+    audio_buffer_list.buffers[0].number_channels = client_data_format.channels_per_frame;
 
     let number_frames = env.mem.read(io_number_frames);
-    let bytes_per_frame = host_object.client_data_format.unwrap().bytes_per_frame;
-    let number_of_bytes = number_frames.checked_mul(bytes_per_frame).unwrap();
+    if number_frames == 0 {
+        return 0;
+    }
+    let bytes_per_frame = client_data_format.bytes_per_frame;
+    let number_of_bytes = match number_frames.checked_mul(bytes_per_frame) {
+        Some(b) => b,
+        None => return kAudioFileUnspecifiedError,
+    };
     let number_of_bytes_ptr = env.mem.alloc_and_write(number_of_bytes);
     let res = AudioFileReadBytes(
         env,
@@ -234,11 +351,7 @@ fn ExtAudioFileRead(
     );
     let number_of_bytes_read = env.mem.read(number_of_bytes_ptr);
     env.mem.free(number_of_bytes_ptr.cast());
-    if res != 0 {
-        if res == eofErr {
-            env.mem.write(io_number_frames, 0);
-            return 0;
-        }
+    if res != 0 && res != eofErr {
         log!(
             "ExtAudioFileRead({:?}, {:?}, {:?}) failed, error: {:?}",
             in_ext_audio_file,
@@ -248,10 +361,12 @@ fn ExtAudioFileRead(
         );
         return res;
     }
-    env.mem.write(
-        io_number_frames,
-        number_of_bytes_read.checked_div(bytes_per_frame).unwrap(),
-    );
+    let frames_read = if bytes_per_frame > 0 {
+        number_of_bytes_read / bytes_per_frame
+    } else {
+        0
+    };
+    env.mem.write(io_number_frames, frames_read);
     audio_buffer_list.buffers[0].data_byte_size = number_of_bytes_read;
 
     let host_object = env
@@ -276,19 +391,20 @@ fn ExtAudioFileDispose(env: &mut Environment, in_ext_audio_file: ExtAudioFileRef
         .audio_toolbox
         .extended_audio_file
         .extended_audio_files
-        .get(&in_ext_audio_file)
-        .unwrap();
+        .remove(&in_ext_audio_file);
+
+    let Some(host_object) = host_object else {
+        return kAudioFileUnspecifiedError;
+    };
 
     let res = AudioFileClose(env, host_object.guest_audio_file);
-    assert_eq!(res, 0); // success
+    if res != 0 {
+        log!(
+            "Warning: ExtAudioFileDispose: AudioFileClose failed with error: {}",
+            res
+        );
+    }
 
-    let _host_object = env
-        .framework_state
-        .audio_toolbox
-        .extended_audio_file
-        .extended_audio_files
-        .remove(&in_ext_audio_file)
-        .unwrap();
     env.mem.free(in_ext_audio_file.cast());
 
     0 // success
@@ -301,3 +417,46 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(ExtAudioFileRead(_, _, _)),
     export_c_func!(ExtAudioFileDispose(_)),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_property_constants() {
+        assert_eq!(kExtAudioFileProperty_FileDataFormat, 0x66666d74);
+        assert_eq!(kExtAudioFileProperty_FileLengthFrames, 0x2366726d);
+        assert_eq!(kExtAudioFileProperty_ClientDataFormat, 0x63666d74);
+    }
+
+    #[test]
+    fn test_frame_calculation() {
+        let packet_count: u64 = 44100;
+        let frames_per_packet: u64 = 1;
+        let total_frames = (packet_count * frames_per_packet) as i64;
+        assert_eq!(total_frames, 44100i64);
+
+        let large_packet_count: u64 = 192000 * 3600; // 1 hour at 192kHz
+        let total_large_frames = (large_packet_count * frames_per_packet) as i64;
+        assert_eq!(total_large_frames, 691200000i64);
+    }
+
+    #[test]
+    fn test_partial_buffer_frame_calculation() {
+        let bytes_per_frame = 4; // 16-bit stereo
+        let requested_frames = 1024;
+        let requested_bytes = requested_frames * bytes_per_frame;
+        assert_eq!(requested_bytes, 4096);
+
+        // Simulate reaching EOF with partial data (e.g. 1500 bytes read out of 4096)
+        let bytes_read = 1500;
+        let frames_read = bytes_read / bytes_per_frame;
+        assert_eq!(frames_read, 375);
+
+        // When at EOF already (0 bytes read)
+        let eof_bytes_read = 0;
+        let eof_frames_read = eof_bytes_read / bytes_per_frame;
+        assert_eq!(eof_frames_read, 0);
+    }
+}
+

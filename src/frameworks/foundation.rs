@@ -11,7 +11,7 @@
 //! Being aware of this concept will make common types like `NSArray` and
 //! `NSString` easier to understand.
 
-use crate::dyld::{export_c_func, FunctionExports};
+use crate::dyld::{export_c_func, ConstantExports, FunctionExports, HostConstant};
 use crate::objc::id;
 use crate::Environment;
 
@@ -42,8 +42,10 @@ pub mod ns_method_signature;
 pub mod ns_notification;
 pub mod ns_notification_center;
 pub mod ns_null;
+pub mod ns_number_formatter;
 pub mod ns_objc_runtime;
 pub mod ns_object;
+pub mod ns_operation;
 pub mod ns_process_info;
 pub mod ns_property_list_serialization;
 pub mod ns_run_loop;
@@ -76,6 +78,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ns_dictionary::CLASSES,
         ns_enumerator::CLASSES,
         ns_error::CLASSES,
+        ns_exception::CLASSES,
         ns_file_handle::CLASSES,
         ns_file_manager::CLASSES,
         ns_garbage_collector::CLASSES,
@@ -88,8 +91,10 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ns_notification::CLASSES,
         ns_notification_center::CLASSES,
         ns_null::CLASSES,
+        ns_number_formatter::CLASSES,
         ns_method_signature::CLASSES,
         ns_object::CLASSES,
+        ns_operation::CLASSES,
         ns_process_info::CLASSES,
         ns_property_list_serialization::CLASSES,
         ns_run_loop::CLASSES,
@@ -107,6 +112,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ns_xml_parser::CLASSES,
     ],
     constant_exports: &[
+        CONSTANTS,
         ns_error::CONSTANTS,
         ns_exception::CONSTANTS,
         ns_file_manager::CONSTANTS,
@@ -122,6 +128,13 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ns_objc_runtime::FUNCTIONS,
     ],
 };
+
+const CONSTANTS: ConstantExports = &[
+    (
+        "_NSKeyValueChangeNewKey",
+        HostConstant::NSString("new"),
+    ),
+];
 
 #[derive(Default)]
 pub struct State {
@@ -149,7 +162,7 @@ pub type NSUInteger = u32;
 // this should be equal to NSIntegerMax
 pub const NSNotFound: i32 = 0x7fffffff;
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C, packed)]
 pub struct NSRange {
     pub location: NSUInteger,
@@ -204,4 +217,46 @@ fn hash_helper<T: std::hash::Hash>(hashable: &T) -> NSUInteger {
     (hash_u64 as u32) ^ ((hash_u64 >> 32) as u32)
 }
 
-const FUNCTIONS: FunctionExports = &[export_c_func!(NSStringFromRange(_))];
+fn NSIntersectionRange(_env: &mut Environment, r1: NSRange, r2: NSRange) -> NSRange {
+    let min1 = r1.location;
+    let max1 = r1.location.saturating_add(r1.length);
+    let min2 = r2.location;
+    let max2 = r2.location.saturating_add(r2.length);
+
+    let start = min1.max(min2);
+    let end = max1.min(max2);
+
+    if end <= start {
+        NSRange {
+            location: 0,
+            length: 0,
+        }
+    } else {
+        NSRange {
+            location: start,
+            length: end - start,
+        }
+    }
+}
+
+fn NSUnionRange(_env: &mut Environment, r1: NSRange, r2: NSRange) -> NSRange {
+    let min1 = r1.location;
+    let max1 = r1.location.saturating_add(r1.length);
+    let min2 = r2.location;
+    let max2 = r2.location.saturating_add(r2.length);
+
+    let start = min1.min(min2);
+    let end = max1.max(max2);
+
+    NSRange {
+        location: start,
+        length: end - start,
+    }
+}
+
+const FUNCTIONS: FunctionExports = &[
+    export_c_func!(NSStringFromRange(_)),
+    export_c_func!(NSIntersectionRange(_, _)),
+    export_c_func!(NSUnionRange(_, _)),
+];
+

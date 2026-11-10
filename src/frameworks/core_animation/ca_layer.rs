@@ -49,6 +49,7 @@ pub(super) struct CALayerHostObject {
     pub(super) opacity: f32,
     pub(super) background_color: Option<CGColorHostObject>,
     pub(super) corner_radius: CGFloat,
+    pub(super) masks_to_bounds: bool,
     pub(super) needs_display: bool,
     pub(super) needs_display_on_bounds_change: bool,
     /// `CGImageRef*`
@@ -127,6 +128,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         opacity: 1.0,
         background_color: None, // transparency
         corner_radius: 0.0,
+        masks_to_bounds: false,
         needs_display: false,
         needs_display_on_bounds_change: false,
         contents: nil,
@@ -202,22 +204,50 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())insertSublayer:(id)layer atIndex:(u32)idx {
+    if layer == nil {
+        return;
+    }
     retain(env, layer);
     () = msg![env; layer removeFromSuperlayer];
     env.objc.borrow_mut::<CALayerHostObject>(layer).superlayer = this;
 
     let CALayerHostObject { ref mut sublayers, .. } = env.objc.borrow_mut(this);
-    sublayers.insert(idx.try_into().unwrap(), layer);
+    let idx = (idx as usize).min(sublayers.len());
+    sublayers.insert(idx, layer);
 }
 
 - (())insertSublayer:(id)layer below:(id)sibling {
+    if layer == nil {
+        return;
+    }
     retain(env, layer);
     () = msg![env; layer removeFromSuperlayer];
     env.objc.borrow_mut::<CALayerHostObject>(layer).superlayer = this;
 
     let CALayerHostObject { ref mut sublayers, .. } = env.objc.borrow_mut(this);
-    let idx = sublayers.iter().position(|&sublayer| sublayer == sibling).unwrap();
-    sublayers.insert(idx, layer);
+    let idx = sublayers.iter().position(|&sublayer| sublayer == sibling);
+    if let Some(idx) = idx {
+        sublayers.insert(idx, layer);
+    } else {
+        sublayers.push(layer);
+    }
+}
+
+- (())insertSublayer:(id)layer above:(id)sibling {
+    if layer == nil {
+        return;
+    }
+    retain(env, layer);
+    () = msg![env; layer removeFromSuperlayer];
+    env.objc.borrow_mut::<CALayerHostObject>(layer).superlayer = this;
+
+    let CALayerHostObject { ref mut sublayers, .. } = env.objc.borrow_mut(this);
+    let idx = sublayers.iter().position(|&sublayer| sublayer == sibling);
+    if let Some(idx) = idx {
+        sublayers.insert(idx + 1, layer);
+    } else {
+        sublayers.push(layer);
+    }
 }
 
 - (())removeFromSuperlayer {
@@ -361,6 +391,13 @@ pub const CLASSES: ClassExports = objc_classes! {
         let opacity: id = msg_class![env; NSNumber numberWithFloat:opacity];
         add_default_implied_basic_animation(env, this, "opacity", old_opacity, opacity);
     }
+}
+
+- (bool)masksToBounds {
+    env.objc.borrow::<CALayerHostObject>(this).masks_to_bounds
+}
+- (())setMasksToBounds:(bool)masks {
+    env.objc.borrow_mut::<CALayerHostObject>(this).masks_to_bounds = masks;
 }
 
 - (CGColorRef)backgroundColor {
@@ -612,7 +649,7 @@ pub fn remove_anonymous_animation(env: &mut Environment, layer: id, animation: i
     release(env, animation);
 }
 
-fn transform_for_conversion(env: &mut Environment, this: id, other: id) -> CGAffineTransform {
+pub(super) fn transform_for_conversion(env: &mut Environment, this: id, other: id) -> CGAffineTransform {
     // The convertPoint methods can be used in two ways:
     // - If two layers are provided (one as the receiver, one as a parameter),
     //   then the layers are required to have a common ancestor, and it will be

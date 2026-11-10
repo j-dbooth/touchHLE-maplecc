@@ -5,7 +5,7 @@
  */
 //! `NSData` and `NSMutableData`.
 
-use super::ns_string::to_rust_string;
+use super::ns_string::{get_static_str, to_rust_string};
 use super::{NSRange, NSUInteger};
 use crate::frameworks::foundation::ns_keyed_unarchiver::decode_current_data;
 use crate::fs::GuestPath;
@@ -204,6 +204,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     decode_current_data(env, coder, /* is_mutable: */ true)
 }
 
+- (())encodeWithCoder:(id)coder {
+    let &NSDataHostObject { bytes, length, .. } = env.objc.borrow(this);
+    let key = get_static_str(env, "NS.data");
+    () = msg![env; coder encodeBytes:(bytes.cast_const()) length:length forKey:key];
+}
+
 - (id)mutableCopyWithZone:(NSZonePtr)_zone {
     let bytes: ConstVoidPtr = msg![env; this bytes];
     let length: NSUInteger = msg![env; this length];
@@ -252,6 +258,13 @@ pub const CLASSES: ClassExports = objc_classes! {
         bytes.cast_const(),
         length,
     );
+}
+
+- (id)subdataWithRange:(NSRange)range {
+    let &NSDataHostObject { bytes, length, .. } = env.objc.borrow(this);
+    assert!(range.location + range.length <= length);
+    let sub_bytes = bytes.cast_const() + range.location;
+    msg_class![env; NSData dataWithBytes:sub_bytes length:(range.length)]
 }
 
 @end
@@ -350,3 +363,15 @@ pub fn to_rust_slice(env: &mut Environment, data: id) -> &[u8] {
     env.mem
         .bytes_at(borrowed_data.bytes.cast(), borrowed_data.length)
 }
+
+pub fn from_rust_slice(env: &mut Environment, slice: &[u8]) -> id {
+    if slice.is_empty() {
+        return msg_class![env; NSData data];
+    }
+    let len = slice.len() as u32;
+    let ptr = env.mem.alloc(len);
+    env.mem.bytes_at_mut(ptr.cast(), len).copy_from_slice(slice);
+    msg_class![env; NSData dataWithBytesNoCopy:ptr length:len freeWhenDone:true]
+}
+
+

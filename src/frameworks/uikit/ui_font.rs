@@ -11,7 +11,7 @@ use crate::frameworks::core_graphics::cg_bitmap_context::CGBitmapContextDrawer;
 use crate::frameworks::core_graphics::{CGFloat, CGPoint, CGRect, CGSize};
 use crate::frameworks::foundation::ns_string::to_rust_string;
 use crate::frameworks::foundation::NSInteger;
-use crate::objc::{autorelease, id, msg, objc_classes, ClassExports, HostObject};
+use crate::objc::{autorelease, id, msg, nil, objc_classes, ClassExports, HostObject, NSZonePtr};
 use crate::Environment;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -95,6 +95,14 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 @implementation UIFont: NSObject
 
++ (id)allocWithZone:(NSZonePtr)_zone {
+    let host_object = UIFontHostObject {
+        size: 14.0,
+        kind: FontKind::SansRegular,
+    };
+    env.objc.alloc_object(this, Box::new(host_object), &mut env.mem)
+}
+
 // Values are checked against iPhone 3GS, iOS 4.0.1
 + (CGFloat)labelFontSize {
     17.0
@@ -138,13 +146,45 @@ pub const CLASSES: ClassExports = objc_classes! {
     let font_name = to_rust_string(env, fontName).to_string();
     let host_object = UIFontHostObject {
         kind: get_equivalent_font(&font_name).unwrap_or_else(|| {
-            log!("No replacement found for font {}. Using system font instead.", font_name);
+            log_dbg!("No replacement found for font {}. Using system font instead.", font_name);
             FontKind::SansRegular
         }),
         size: fontSize,
     };
     let new = env.objc.alloc_object(this, Box::new(host_object), &mut env.mem);
     autorelease(env, new)
+}
+
+- (id)initWithCoder:(id)coder {
+    let name_key = crate::frameworks::foundation::ns_string::get_static_str(env, "UIFontName");
+    let size_key = crate::frameworks::foundation::ns_string::get_static_str(env, "UIFontPointSize");
+    let name: id = msg![env; coder decodeObjectForKey:name_key];
+    let mut size: CGFloat = 14.0;
+    let size_key_exists: bool = msg![env; coder containsValueForKey:size_key];
+    if size_key_exists {
+        let size_d: f64 = msg![env; coder decodeDoubleForKey:size_key];
+        if size_d > 0.0 {
+            size = size_d as CGFloat;
+        } else {
+            let size_f: f32 = msg![env; coder decodeFloatForKey:size_key];
+            if size_f > 0.0 {
+                size = size_f as CGFloat;
+            }
+        }
+    }
+    let kind = if name != nil {
+        let font_name = to_rust_string(env, name).to_string();
+        get_equivalent_font(&font_name).unwrap_or_else(|| {
+            log_dbg!("No replacement found for font {}. Using system font instead.", font_name);
+            FontKind::SansRegular
+        })
+    } else {
+        FontKind::SansRegular
+    };
+    let host_object = env.objc.borrow_mut::<UIFontHostObject>(this);
+    host_object.size = size;
+    host_object.kind = kind;
+    this
 }
 
 - (CGFloat)ascender {
@@ -426,10 +466,10 @@ fn get_equivalent_font(system_font: &str) -> Option<FontKind> {
         "Courier-Oblique" => None,
         "Courier-Bold" => None,
         // Font Family: AppleGothic
-        "AppleGothic" => None,
+        "AppleGothic" => Some(FontKind::SansRegular),
         // Font Family: Arial
-        "ArialMT" => Some(FontKind::SansRegular),
-        "Arial-BoldMT" => Some(FontKind::SansBold),
+        "ArialMT" | "Arial" => Some(FontKind::SansRegular),
+        "Arial-BoldMT" | "Arial-Bold" => Some(FontKind::SansBold),
         "Arial-BoldItalicMT" => Some(FontKind::SansBoldItalic),
         "Arial-ItalicMT" => Some(FontKind::SansItalic),
         // Font Family: STHeiti TC
@@ -454,32 +494,39 @@ fn get_equivalent_font(system_font: &str) -> Option<FontKind> {
         "AmericanTypewriter" => Some(FontKind::MonoRegular),
         "AmericanTypewriter-Bold" => Some(FontKind::MonoBold),
         // Font Family: Helvetica
-        "Helvetica-Oblique" => None,
-        "Helvetica-BoldOblique" => None,
-        "Helvetica" => None,
-        "Helvetica-Bold" => None,
+        "Helvetica-Oblique" => Some(FontKind::SansItalic),
+        "Helvetica-BoldOblique" => Some(FontKind::SansBoldItalic),
+        "Helvetica" => Some(FontKind::SansRegular),
+        "Helvetica-Bold" => Some(FontKind::SansBold),
         // Font Family: Marker Felt
-        "MarkerFelt-Thin" => None,
+        "MarkerFelt-Thin" => Some(FontKind::SansBold),
         // Font Family: Helvetica Neue
-        "HelveticaNeue" => None,
-        "HelveticaNeue-Bold" => None,
+        "HelveticaNeue" | "HelveticaNeue-Regular" => Some(FontKind::SansRegular),
+        "HelveticaNeue-Bold" => Some(FontKind::SansBold),
+        "HelveticaNeue-Italic" => Some(FontKind::SansItalic),
+        "HelveticaNeue-BoldItalic" => Some(FontKind::SansBoldItalic),
         // Font Family: DB LCD Temp
         "DBLCDTempBlack" => None,
         // Font Family: Verdana
-        "Verdana-Bold" => None,
-        "Verdana-BoldItalic" => None,
-        "Verdana" => None,
-        "Verdana-Italic" => None,
+        "Verdana-Bold" => Some(FontKind::SansBold),
+        "Verdana-BoldItalic" => Some(FontKind::SansBoldItalic),
+        "Verdana" => Some(FontKind::SansRegular),
+        "Verdana-Italic" => Some(FontKind::SansItalic),
         // Font Family: Times New Roman
         "TimesNewRomanPSMT" => Some(FontKind::SerifRegular),
         "TimesNewRomanPS-BoldMT" => Some(FontKind::SerifBold),
         "TimesNewRomanPS-BoldItalicMT" => Some(FontKind::SerifBoldItalic),
         "TimesNewRomanPS-ItalicMT" => Some(FontKind::SerifItalic),
         // Font Family: Georgia
-        "Georgia-Bold" => None,
-        "Georgia" => None,
-        "Georgia-BoldItalic" => None,
-        "Georgia-Italic" => None,
+        "Georgia-Bold" => Some(FontKind::SerifBold),
+        "Georgia" => Some(FontKind::SerifRegular),
+        "Georgia-BoldItalic" => Some(FontKind::SerifBoldItalic),
+        "Georgia-Italic" => Some(FontKind::SerifItalic),
+        // Font Family: Trebuchet MS
+        "TrebuchetMS" | "Trebuchet" | "Trebuchet MS" | "TrebuchetMS-Regular" => Some(FontKind::SansRegular),
+        "TrebuchetMS-Bold" | "Trebuchet-Bold" | "Trebuchet MS Bold" | "Trebuchet MS-Bold" => Some(FontKind::SansBold),
+        "TrebuchetMS-Italic" | "Trebuchet-Italic" | "Trebuchet MS Italic" => Some(FontKind::SansItalic),
+        "Trebuchet-BoldItalic" | "TrebuchetMS-BoldItalic" | "Trebuchet MS Bold Italic" => Some(FontKind::SansBoldItalic),
         _ => None,
     }
 }

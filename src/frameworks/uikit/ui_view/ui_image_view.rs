@@ -8,10 +8,10 @@
 use crate::frameworks::core_graphics::cg_image::CGImageRef;
 use crate::frameworks::core_graphics::{CGPoint, CGRect, CGSize};
 use crate::frameworks::foundation::ns_string::get_static_str;
-use crate::frameworks::foundation::NSTimeInterval;
+use crate::frameworks::foundation::{NSInteger, NSTimeInterval, NSUInteger};
 use crate::objc::{
-    id, impl_HostObject_with_superclass, msg, msg_super, objc_classes, release, retain,
-    todo_objc_setter, ClassExports, NSZonePtr,
+    id, impl_HostObject_with_superclass, msg, msg_super, nil, objc_classes, release, retain,
+    ClassExports, NSZonePtr,
 };
 
 #[derive(Default)]
@@ -19,6 +19,11 @@ struct UIImageViewHostObject {
     superclass: super::UIViewHostObject,
     /// `UIImage*`
     image: id,
+    /// `NSArray<UIImage *>*`
+    animation_images: id,
+    animation_duration: NSTimeInterval,
+    animation_repeat_count: NSInteger,
+    is_animating: bool,
 }
 impl_HostObject_with_superclass!(UIImageViewHostObject);
 
@@ -35,6 +40,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (id)initWithFrame:(CGRect)frame {
     let this: id = msg_super![env; this initWithFrame:frame];
+    () = msg![env; this setUserInteractionEnabled:false];
     // Not sure if UIImageView does this unconditionally, or only for images
     // with alpha channels.
     () = msg![env; this setOpaque:false];
@@ -42,11 +48,12 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())dealloc {
-    let &UIImageViewHostObject {
-        superclass: _,
-        image,
-    } = env.objc.borrow(this);
+    let (image, anim_images) = {
+        let host = env.objc.borrow::<UIImageViewHostObject>(this);
+        (host.image, host.animation_images)
+    };
     release(env, image);
+    release(env, anim_images);
     msg_super![env; this dealloc]
 }
 
@@ -87,27 +94,69 @@ pub const CLASSES: ClassExports = objc_classes! {
     release(env, old_image);
 
     let layer: id = msg![env; this layer];
-    let cg_image: CGImageRef = msg![env; new_image CGImage];
+    let cg_image: CGImageRef = if new_image != nil {
+        msg![env; new_image CGImage]
+    } else {
+        nil
+    };
     () = msg![env; layer setContents:cg_image];
 }
 
 - (())setAnimationImages:(id)images { // NSArray<UIImage *>*
-    todo_objc_setter!(this, images);
-    // TODO: Use all images in the array instead of just the first one
-    let first_image: id = msg![env; images objectAtIndex:0u32];
-    () = msg![env; this setImage:first_image];
+    let host_obj = env.objc.borrow_mut::<UIImageViewHostObject>(this);
+    let old = std::mem::replace(&mut host_obj.animation_images, images);
+    retain(env, images);
+    release(env, old);
+
+    if images != nil {
+        let count: NSUInteger = msg![env; images count];
+        if count > 0 {
+            let first_image: id = msg![env; images objectAtIndex:0u32];
+            () = msg![env; this setImage:first_image];
+        }
+    }
+}
+
+- (id)animationImages {
+    env.objc.borrow::<UIImageViewHostObject>(this).animation_images
 }
 
 - (())setAnimationDuration:(NSTimeInterval)duration {
-    todo_objc_setter!(this, duration);
+    env.objc.borrow_mut::<UIImageViewHostObject>(this).animation_duration = duration;
+}
+
+- (NSTimeInterval)animationDuration {
+    env.objc.borrow::<UIImageViewHostObject>(this).animation_duration
+}
+
+- (())setAnimationRepeatCount:(NSInteger)repeat_count {
+    env.objc.borrow_mut::<UIImageViewHostObject>(this).animation_repeat_count = repeat_count;
+}
+
+- (NSInteger)animationRepeatCount {
+    env.objc.borrow::<UIImageViewHostObject>(this).animation_repeat_count
+}
+
+- (bool)isAnimating {
+    env.objc.borrow::<UIImageViewHostObject>(this).is_animating
 }
 
 - (())startAnimating {
-    log!("TODO: [(UIImageView*) {:?} startAnimating]", this);
+    log_dbg!("[(UIImageView*) {:?} startAnimating]", this);
+    env.objc.borrow_mut::<UIImageViewHostObject>(this).is_animating = true;
 }
 
 - (())stopAnimating {
-    log!("TODO: [(UIImageView*) {:?} stopAnimating]", this);
+    log_dbg!("[(UIImageView*) {:?} stopAnimating]", this);
+    env.objc.borrow_mut::<UIImageViewHostObject>(this).is_animating = false;
+}
+
+- (())setHighlightedAnimationImages:(id)_images {
+    // no-op
+}
+
+- (id)highlightedAnimationImages {
+    nil
 }
 
 @end

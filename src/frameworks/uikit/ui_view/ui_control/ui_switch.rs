@@ -143,8 +143,7 @@ fn init_common(env: &mut Environment, this: id) -> id {
 
     let selector = env
         .objc
-        .lookup_selector("_touchHLE_flipAction:forEvent:")
-        .unwrap();
+        .register_host_selector("_touchHLE_flipAction:forEvent:".to_string(), &mut env.mem);
     () = msg![env; this addTarget:this
                            action:selector
                  forControlEvents:UIControlEventTouchUpInside];

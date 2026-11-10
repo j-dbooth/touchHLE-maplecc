@@ -125,33 +125,24 @@ pub const CLASSES: ClassExports = objc_classes! {
     let id_nss: id = msg![env; coder decodeObjectForKey:id_key];
     let id = to_rust_string(env, id_nss);
 
-    if id == "IBFilesOwner" {
-        // The file owner is usually the UIApplication instance.
-        // Replacing the proxy with that instance is important so that the
-        // "delegate" outlet can be connected between it and the
-        // UIApplicationDelegate.
-        //
-        // TODO: Below implementation could still be "wrong".
-        // Other options to consider:
-        // - The name "UIProxyObject" implies that it might be intended to
-        //   proxy messages to another object, rather than be replaced by it.
-        //   Check what iPhone OS does?
-        // - If this object is meant to be replaced, it's probably meant to
-        //   be done _after_ the call to `initWithCoder:`
+    if id == "IBFilesOwner" || id == "IBFirstResponder" {
+        // The file owner is usually the UIApplication instance or a UIViewController.
+        // Replacing the proxy with that instance is important so that outlets and actions
+        // (including IBFirstResponder target-actions) can be connected.
         let delegate: id = msg![env; coder delegate];
-        // TODO: can this happen?
-        assert!(delegate != nil);
-        let ui_nib_class: Class = msg_class![env; UINib class];
-        let delegate_class: Class = msg![env; delegate class];
-        assert!(msg![env; delegate_class isKindOfClass:ui_nib_class]);
-        let file_owner = env.objc.borrow::<UINibHostObject>(delegate).file_owner;
-        assert!(file_owner != nil);
-        release(env, this);
-        // NSKeyedUnarchiver holds ownership of already instantiated objects
-        // and release them on dealloc. But here we replace a proxy object with
-        // a file owner! Thus, we must retain it on behalf of the coder.
-        retain(env, file_owner);
-        file_owner
+        if delegate != nil {
+            let ui_nib_class: Class = msg_class![env; UINib class];
+            let delegate_class: Class = msg![env; delegate class];
+            if msg![env; delegate_class isKindOfClass:ui_nib_class] {
+                let file_owner = env.objc.borrow::<UINibHostObject>(delegate).file_owner;
+                if file_owner != nil {
+                    release(env, this);
+                    retain(env, file_owner);
+                    return file_owner;
+                }
+            }
+        }
+        this
     } else {
         log!("TODO: UIProxyObject replacement for {}, instance {:?} left unreplaced", id, this);
         this
@@ -176,10 +167,19 @@ pub const CLASSES: ClassExports = objc_classes! {
     let orig_nss: id = msg![env; coder decodeObjectForKey:orig_key];
     let orig = to_rust_string(env, orig_nss);
 
-    let class = env.objc.get_known_class(&name, &mut env.mem);
+    let class = if let Some(cls) = env.objc.find_class(&name, &mut env.mem) {
+        cls
+    } else if let Some(orig_cls) = env.objc.find_class(&orig, &mut env.mem) {
+        log!("Warning: UIClassSwapper class '{}' not found, falling back to original class '{}'", name, orig);
+        orig_cls
+    } else {
+        log!("Warning: UIClassSwapper class '{}' and orig '{}' not found, falling back to NSObject", name, orig);
+        env.objc.get_known_class("NSObject", &mut env.mem)
+    };
 
     let object: id = msg![env; class alloc];
-    let object: id = if orig == "UICustomObject" {
+    let init_with_coder_sel = env.objc.register_host_selector("initWithCoder:".to_string(), &mut env.mem);
+    let object: id = if orig == "UICustomObject" || !env.objc.object_has_method(&env.mem, object, init_with_coder_sel) {
         msg![env; object init]
     } else {
         msg![env; object initWithCoder:coder]
@@ -274,7 +274,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     } = env.objc.borrow(this);
 
     let selector = to_rust_string(env, label);
-    let action = env.objc.lookup_selector(&selector).unwrap();
+    let action = env.objc.register_host_selector(selector.to_string(), &mut env.mem);
 
     () = msg![env; source addTarget:destination action:action forControlEvents:event_mask];
 }
@@ -324,6 +324,14 @@ pub const CLASSES: ClassExports = objc_classes! {
     } = env.objc.borrow(this);
 
     () = msg![env; source setValue:destination forKey:label];
+}
+
+@end
+
+@implementation UIRuntimeAccessibilityConfiguration: NSObject
+
+- (id)initWithCoder:(id)_coder {
+    this
 }
 
 @end

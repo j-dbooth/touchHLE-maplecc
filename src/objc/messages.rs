@@ -192,7 +192,17 @@ fn objc_msgSend_inner(
     }
 
     let orig_class = super2.unwrap_or_else(|| ObjC::read_isa(receiver, &env.mem));
-    assert!(orig_class != nil);
+    if orig_class == nil {
+        log!(
+            "Warning: objc_msgSend on invalid object {:?} with isa == nil for selector {:?} (PC: {:#x}, LR: {:#x})",
+            receiver,
+            selector.as_str(&env.mem),
+            env.cpu.regs()[15],
+            env.cpu.regs()[14]
+        );
+        env.cpu.regs_mut()[0..2].fill(0);
+        return;
+    }
     if !skip_initialize {
         maybe_initialize_class(env, receiver);
     }
@@ -227,7 +237,18 @@ fn objc_msgSend_inner(
             );
         }
 
-        let host_object = env.objc.get_host_object(class).unwrap();
+        let Some(host_object) = env.objc.get_host_object(class) else {
+            log!(
+                "Warning: objc_msgSend encountered invalid class {:?} for object {:?} selector {:?} (PC: {:#x}, LR: {:#x})",
+                class,
+                receiver,
+                selector.as_str(&env.mem),
+                env.cpu.regs()[15],
+                env.cpu.regs()[14]
+            );
+            env.cpu.regs_mut()[0..2].fill(0);
+            return;
+        };
 
         if let Some(&super::ClassHostObject {
             superclass,
@@ -408,7 +429,28 @@ pub(super) fn objc_msgSendSuper2(
     super_ptr: ConstPtr<objc_super>,
     selector: SEL,
 ) {
+    if super_ptr.is_null() {
+        log!(
+            "Warning: objc_msgSendSuper2 called with null super_ptr for selector {:?}",
+            selector.as_str(&env.mem)
+        );
+        env.cpu.regs_mut()[0..2].fill(0);
+        return;
+    }
     let objc_super { receiver, class } = env.mem.read(super_ptr);
+    if receiver == nil {
+        env.cpu.regs_mut()[0..2].fill(0);
+        return;
+    }
+    if class == nil {
+        log!(
+            "Warning: objc_msgSendSuper2 called with class == nil for receiver {:?} selector {:?}",
+            receiver,
+            selector.as_str(&env.mem)
+        );
+        env.cpu.regs_mut()[0..2].fill(0);
+        return;
+    }
 
     // Rewrite first argument to match the normal ABI.
     crate::abi::write_next_arg(&mut 0, env.cpu.regs_mut(), &mut env.mem, receiver);

@@ -49,9 +49,9 @@ unsafe impl SafeRead for AudioFilePacketTableInfo {}
 #[allow(dead_code)]
 const kAudioFileFileNotFoundError: OSStatus = -43;
 pub const kAudioFileBadPropertySizeError: OSStatus = fourcc(b"!siz") as _;
-const kAudioFileUnsupportedPropertyError: OSStatus = fourcc(b"pty?") as _;
-const kAudioFileUnsupportedFileTypeError: OSStatus = fourcc(b"typ?") as _;
-const kAudioFileUnspecifiedError: OSStatus = fourcc(b"wht?") as _;
+pub const kAudioFileUnsupportedPropertyError: OSStatus = fourcc(b"pty?") as _;
+pub const kAudioFileUnsupportedFileTypeError: OSStatus = fourcc(b"typ?") as _;
+pub const kAudioFileUnspecifiedError: OSStatus = fourcc(b"wht?") as _;
 
 type AudioFilePermissions = i8;
 pub const kAudioFileReadPermission: AudioFilePermissions = 1;
@@ -274,16 +274,21 @@ pub fn AudioFileGetProperty(
     out_property_data: MutVoidPtr,
 ) -> OSStatus {
     return_if_null!(in_audio_file);
+    return_if_null!(io_data_size);
 
     let required_size = property_size(in_property_id);
-    if env.mem.read(io_data_size) != required_size {
+    if env.mem.read(io_data_size) < required_size {
         log!(
-            "Warning: AudioFileGetProperty({}) failed, {} != {}",
+            "Warning: AudioFileGetProperty({}) failed, {} < {}",
             debug_fourcc(in_property_id),
             env.mem.read(io_data_size),
             required_size
         );
         return kAudioFileBadPropertySizeError;
+    }
+    env.mem.write(io_data_size, required_size);
+    if out_property_data.is_null() {
+        return 0; // success: size query only
     }
 
     let host_object = State::get(&mut env.framework_state)
@@ -345,6 +350,8 @@ pub fn AudioFileReadBytes(
     out_buffer: MutVoidPtr,
 ) -> OSStatus {
     return_if_null!(in_audio_file);
+    return_if_null!(io_num_bytes);
+    return_if_null!(out_buffer);
 
     let host_object = State::get(&mut env.framework_state)
         .audio_files
@@ -352,13 +359,31 @@ pub fn AudioFileReadBytes(
         .unwrap();
 
     let bytes_to_read = env.mem.read(io_num_bytes);
+    if bytes_to_read == 0 {
+        return 0;
+    }
+    let Ok(starting_offset) = u64::try_from(in_starting_byte) else {
+        log!(
+            "Warning: AudioFileReadBytes() invalid starting byte: {}",
+            in_starting_byte
+        );
+        env.mem.write(io_num_bytes, 0);
+        return eofErr;
+    };
+
     let buffer_slice = env.mem.bytes_at_mut(out_buffer.cast(), bytes_to_read);
 
-    let bytes_read = host_object
+    let bytes_read = match host_object
         .audio_file
-        .read_bytes(in_starting_byte.try_into().unwrap(), buffer_slice)
-        .unwrap(); // TODO: handle seek error?
-    env.mem.write(io_num_bytes, bytes_read.try_into().unwrap());
+        .read_bytes(starting_offset, buffer_slice)
+    {
+        Ok(read) => read,
+        Err(_) => {
+            env.mem.write(io_num_bytes, 0);
+            return eofErr;
+        }
+    };
+    env.mem.write(io_num_bytes, bytes_read.try_into().unwrap_or(0));
 
     if bytes_read < bytes_to_read as usize {
         eofErr

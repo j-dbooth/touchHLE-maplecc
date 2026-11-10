@@ -15,6 +15,7 @@ pub mod ui_label;
 pub mod ui_page_control;
 pub mod ui_picker_view;
 pub mod ui_scroll_view;
+pub mod ui_table_view_cell;
 pub mod ui_web_view;
 pub mod ui_window;
 
@@ -35,9 +36,10 @@ use crate::frameworks::core_graphics::cg_affine_transform::CGAffineTransform;
 use crate::frameworks::core_graphics::cg_color::CGColorRef;
 use crate::frameworks::core_graphics::cg_context::{CGContextClearRect, CGContextRef};
 use crate::frameworks::core_graphics::{CGFloat, CGPoint, CGRect, CGSize};
+use crate::abi::{CallFromHost, GuestFunction};
 use crate::frameworks::foundation::ns_string::{from_rust_string, get_static_str, to_rust_string};
 use crate::frameworks::foundation::{ns_array, NSInteger, NSTimeInterval, NSUInteger};
-use crate::mem::{ConstVoidPtr, GuestUSize};
+use crate::mem::{ConstPtr, ConstVoidPtr, GuestUSize};
 use crate::objc::{
     autorelease, id, msg, msg_class, msg_send, nil, objc_classes, release, retain,
     todo_objc_setter, Class, ClassExports, HostObject, NSZonePtr, ObjC, SEL,
@@ -69,24 +71,25 @@ const UIViewAnimationCurveLinear: UIViewAnimationCurve = 3;
 #[derive(Default)]
 pub struct State {
     /// List of views for internal purposes. Non-retaining!
-    pub(super) views: Vec<id>,
+    pub views: Vec<id>,
     pub ui_window: ui_window::State,
     pub animation_block_count: usize,
 }
 
-pub(super) struct UIViewHostObject {
+pub struct UIViewHostObject {
     /// CALayer or subclass.
-    layer: id,
+    pub layer: id,
     /// Subviews in back-to-front order. These are strong references.
-    subviews: Vec<id>,
+    pub subviews: Vec<id>,
     /// The superview. This is a weak reference.
-    superview: id,
+    pub superview: id,
     /// The view controller that controls this view. This is a weak reference
-    view_controller: id,
-    tag: NSInteger,
-    clears_context_before_drawing: bool,
-    user_interaction_enabled: bool,
-    multiple_touch_enabled: bool,
+    pub view_controller: id,
+    pub tag: NSInteger,
+    pub clears_context_before_drawing: bool,
+    pub user_interaction_enabled: bool,
+    pub multiple_touch_enabled: bool,
+    pub needs_layout: bool,
 }
 impl HostObject for UIViewHostObject {}
 impl Default for UIViewHostObject {
@@ -102,6 +105,7 @@ impl Default for UIViewHostObject {
             clears_context_before_drawing: true,
             user_interaction_enabled: true,
             multiple_touch_enabled: false,
+            needs_layout: true,
         }
     }
 }
@@ -272,13 +276,13 @@ pub const CLASSES: ClassExports = objc_classes! {
             let will_start_selector: id = msg_class![env; CATransaction valueForKey:(get_static_str(env, touchHLE_kCATransactionAnimationWillStartSelector))];
             if will_start_selector != nil {
                 let will_start_selector = to_rust_string(env, will_start_selector);
-                let will_start_selector = env.objc.lookup_selector(&will_start_selector).unwrap();
+                let will_start_selector = env.objc.register_host_selector(will_start_selector.to_string(), &mut env.mem);
                 () = msg![env; animation_delegate setWillStartSelector:will_start_selector];
             }
             let did_stop_selector: id = msg_class![env; CATransaction valueForKey:(get_static_str(env, touchHLE_kCATransactionAnimationDidStopSelector))];
             if did_stop_selector != nil {
                 let did_stop_selector = to_rust_string(env, did_stop_selector);
-                let did_stop_selector = env.objc.lookup_selector(&did_stop_selector).unwrap();
+                let did_stop_selector = env.objc.register_host_selector(did_stop_selector.to_string(), &mut env.mem);
                 () = msg![env; animation_delegate setDidStopSelector:did_stop_selector];
             }
             let total_animation_count = animations.len() as u32;
@@ -312,6 +316,34 @@ pub const CLASSES: ClassExports = objc_classes! {
     () = msg_class![env; CATransaction commit];
 
     env.framework_state.uikit.ui_view.animation_block_count -= 1;
+}
+
++ (())animateWithDuration:(NSTimeInterval)duration
+                animations:(id)animations {
+    () = msg_class![env; UIView animateWithDuration:duration delay:0.0 options:0u32 animations:animations completion:nil];
+}
+
++ (())animateWithDuration:(NSTimeInterval)duration
+                animations:(id)animations
+                completion:(id)completion {
+    () = msg_class![env; UIView animateWithDuration:duration delay:0.0 options:0u32 animations:animations completion:completion];
+}
+
++ (())animateWithDuration:(NSTimeInterval)_duration
+                     delay:(NSTimeInterval)_delay
+                   options:(NSUInteger)_options
+                animations:(id)animations
+                completion:(id)completion {
+    if animations != nil {
+        let invoke_addr: u32 = env.mem.read(ConstPtr::<u32>::from_bits(animations.to_bits() + 12));
+        let invoke = GuestFunction::from_addr_with_thumb_bit(invoke_addr);
+        let (): () = invoke.call_from_host(env, (animations,));
+    }
+    if completion != nil {
+        let invoke_addr: u32 = env.mem.read(ConstPtr::<u32>::from_bits(completion.to_bits() + 12));
+        let invoke = GuestFunction::from_addr_with_thumb_bit(invoke_addr);
+        let (): () = invoke.call_from_host(env, (completion, 1u8));
+    }
 }
 
 // TODO: accessors etc
@@ -393,6 +425,18 @@ pub const CLASSES: ClassExports = objc_classes! {
     () = msg![env; this setTag:tag];
     () = msg![env; this setMultipleTouchEnabled:multi_touch_enabled];
 
+    let disabled_key = get_static_str(env, "UIUserInteractionDisabled");
+    if msg![env; coder containsValueForKey:disabled_key] {
+        let disabled: bool = msg![env; coder decodeBoolForKey:disabled_key];
+        () = msg![env; this setUserInteractionEnabled:(!disabled)];
+    }
+
+    let clips_key = get_static_str(env, "UIClipsToBounds");
+    if msg![env; coder containsValueForKey:clips_key] {
+        let clips: bool = msg![env; coder decodeBoolForKey:clips_key];
+        () = msg![env; this setClipsToBounds:clips];
+    }
+
     for i in 0..subview_count {
         let subview: id = msg![env; subviews objectAtIndex:i];
         () = msg![env; this addSubview:subview];
@@ -417,12 +461,23 @@ pub const CLASSES: ClassExports = objc_classes! {
     if view_tag == tag {
         return this;
     }
-    for view in subviews {
-        if env.objc.borrow::<UIViewHostObject>(*view).tag == tag {
-            return *view;
+    let subviews_clone: Vec<id> = subviews.clone();
+    for subview in subviews_clone {
+        let found: id = msg![env; subview viewWithTag:tag];
+        if found != nil {
+            return found;
         }
     }
     nil
+}
+
+- (bool)clipsToBounds {
+    let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
+    msg![env; layer masksToBounds]
+}
+- (())setClipsToBounds:(bool)clips {
+    let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
+    () = msg![env; layer setMasksToBounds:clips];
 }
 
 - (bool)isUserInteractionEnabled {
@@ -448,25 +503,59 @@ pub const CLASSES: ClassExports = objc_classes! {
     // nothing.
 }
 
+- (())setNeedsLayout {
+    if let Some(host) = env.objc.try_borrow_mut::<UIViewHostObject>(this) {
+        host.needs_layout = true;
+    }
+}
+
+- (())layoutIfNeeded {
+    let needs_layout = env
+        .objc
+        .try_borrow::<UIViewHostObject>(this)
+        .map(|h| h.needs_layout)
+        .unwrap_or(false);
+    if needs_layout {
+        if let Some(host) = env.objc.try_borrow_mut::<UIViewHostObject>(this) {
+            host.needs_layout = false;
+        }
+        let _: () = msg![env; this layoutSubviews];
+    }
+}
+
 - (id)superview {
     env.objc.borrow::<UIViewHostObject>(this).superview
 }
 
 - (id)window {
     // Looks up window in the superview hierarchy
-    // TODO: cache the result somehow?
-    let mut window: id = env.objc.borrow::<UIViewHostObject>(this).superview;
     let window_class = env.objc.get_known_class("UIWindow", &mut env.mem);
-    while window != nil {
-        let current_class: Class = msg![env; window class];
-        log_dbg!("maybe window {:?} curr class {}", window, env.objc.get_class_name(current_class));
-        if env.objc.class_is_subclass_of(current_class, window_class) {
-            break;
-        }
-        window = env.objc.borrow::<UIViewHostObject>(window).superview;
+    let this_class: Class = msg![env; this class];
+    if env.objc.class_is_subclass_of(this_class, window_class) {
+        return this;
     }
-    log_dbg!("view {:?} has window {:?}", this, window);
-    window
+    let mut current: id = env
+        .objc
+        .try_borrow::<UIViewHostObject>(this)
+        .map(|h| h.superview)
+        .unwrap_or(nil);
+    let mut depth = 0;
+    while current != nil && depth < 100 {
+        if !env.objc.is_object_alive(current) {
+            return nil;
+        }
+        let current_class: Class = msg![env; current class];
+        if env.objc.class_is_subclass_of(current_class, window_class) {
+            return current;
+        }
+        current = env
+            .objc
+            .try_borrow::<UIViewHostObject>(current)
+            .map(|h| h.superview)
+            .unwrap_or(nil);
+        depth += 1;
+    }
+    nil
 }
 
 - (id)subviews {
@@ -499,10 +588,18 @@ pub const CLASSES: ClassExports = objc_classes! {
         let this_layer = this_obj.layer;
         () = msg![env; this_layer addSublayer:subview_layer];
     }
+    if let Some(host) = env.objc.try_borrow_mut::<UIViewHostObject>(this) {
+        host.needs_layout = true;
+    }
+    if let Some(host) = env.objc.try_borrow_mut::<UIViewHostObject>(view) {
+        host.needs_layout = true;
+    }
 }
 
 - (())insertSubview:(id)view atIndex:(NSInteger)index {
-    assert!(view != nil);
+    if view == nil {
+        return;
+    }
     retain(env, view);
     () = msg![env; view removeFromSuperview];
 
@@ -516,13 +613,22 @@ pub const CLASSES: ClassExports = objc_classes! {
         ..
     } = env.objc.borrow_mut(this);
 
-    subviews.insert(index as usize, view);
+    let idx = (index.max(0) as usize).min(subviews.len());
+    subviews.insert(idx, view);
 
-    assert!(index >= 0);
-    () = msg![env; this_layer insertSublayer:subview_layer atIndex:(index as u32)];
+    () = msg![env; this_layer insertSublayer:subview_layer atIndex:(idx as u32)];
+    if let Some(host) = env.objc.try_borrow_mut::<UIViewHostObject>(this) {
+        host.needs_layout = true;
+    }
+    if let Some(host) = env.objc.try_borrow_mut::<UIViewHostObject>(view) {
+        host.needs_layout = true;
+    }
 }
 
 - (())insertSubview:(id)view belowSubview:(id)sibling {
+    if view == nil {
+        return;
+    }
     retain(env, view);
     () = msg![env; view removeFromSuperview];
 
@@ -530,7 +636,11 @@ pub const CLASSES: ClassExports = objc_classes! {
     subview_obj.superview = this;
     let subview_layer = subview_obj.layer;
 
-    let sibling_layer = env.objc.borrow_mut::<UIViewHostObject>(sibling).layer;
+    let sibling_layer = if sibling != nil {
+        env.objc.borrow::<UIViewHostObject>(sibling).layer
+    } else {
+        nil
+    };
 
     let &mut UIViewHostObject {
         ref mut subviews,
@@ -538,10 +648,67 @@ pub const CLASSES: ClassExports = objc_classes! {
         ..
     } = env.objc.borrow_mut(this);
 
-    let idx = subviews.iter().position(|&subview2| subview2 == sibling).unwrap();
-    subviews.insert(idx, view);
+    let idx = subviews.iter().position(|&subview2| subview2 == sibling);
+    if let Some(idx) = idx {
+        subviews.insert(idx, view);
+    } else {
+        subviews.push(view);
+    }
 
-    () = msg![env; this_layer insertSublayer:subview_layer below:sibling_layer];
+    if sibling_layer != nil {
+        () = msg![env; this_layer insertSublayer:subview_layer below:sibling_layer];
+    } else {
+        () = msg![env; this_layer addSublayer:subview_layer];
+    }
+    if let Some(host) = env.objc.try_borrow_mut::<UIViewHostObject>(this) {
+        host.needs_layout = true;
+    }
+    if let Some(host) = env.objc.try_borrow_mut::<UIViewHostObject>(view) {
+        host.needs_layout = true;
+    }
+}
+
+- (())insertSubview:(id)view aboveSubview:(id)sibling {
+    if view == nil {
+        return;
+    }
+    retain(env, view);
+    () = msg![env; view removeFromSuperview];
+
+    let subview_obj = env.objc.borrow_mut::<UIViewHostObject>(view);
+    subview_obj.superview = this;
+    let subview_layer = subview_obj.layer;
+
+    let sibling_layer = if sibling != nil {
+        env.objc.borrow::<UIViewHostObject>(sibling).layer
+    } else {
+        nil
+    };
+
+    let &mut UIViewHostObject {
+        ref mut subviews,
+        layer: this_layer,
+        ..
+    } = env.objc.borrow_mut(this);
+
+    let idx = subviews.iter().position(|&subview2| subview2 == sibling);
+    if let Some(idx) = idx {
+        subviews.insert(idx + 1, view);
+    } else {
+        subviews.push(view);
+    }
+
+    if sibling_layer != nil {
+        () = msg![env; this_layer insertSublayer:subview_layer above:sibling_layer];
+    } else {
+        () = msg![env; this_layer addSublayer:subview_layer];
+    }
+    if let Some(host) = env.objc.try_borrow_mut::<UIViewHostObject>(this) {
+        host.needs_layout = true;
+    }
+    if let Some(host) = env.objc.try_borrow_mut::<UIViewHostObject>(view) {
+        host.needs_layout = true;
+    }
 }
 
 - (())bringSubviewToFront:(id)subview {
@@ -612,6 +779,9 @@ pub const CLASSES: ClassExports = objc_classes! {
     let idx = subviews.iter().position(|&subview| subview == this).unwrap();
     let subview = subviews.remove(idx);
     assert!(subview == this);
+    if let Some(host) = env.objc.try_borrow_mut::<UIViewHostObject>(superview) {
+        host.needs_layout = true;
+    }
     release(env, this);
 }
 
@@ -625,6 +795,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         clears_context_before_drawing: _,
         user_interaction_enabled: _,
         multiple_touch_enabled: _,
+        needs_layout: _,
     } = std::mem::take(env.objc.borrow_mut(this));
 
     release(env, layer);
@@ -636,9 +807,9 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 
     let state = &mut env.framework_state.uikit.ui_view.views;
-    state.swap_remove(
-        state.iter().position(|&v| v == this).unwrap()
-    );
+    if let Some(pos) = state.iter().position(|&v| v == this) {
+        state.swap_remove(pos);
+    }
 
     env.objc.dealloc_object(this, &mut env.mem);
 }
@@ -652,13 +823,24 @@ pub const CLASSES: ClassExports = objc_classes! {
     msg![env; layer isHidden]
 }
 - (())setHidden:(bool)hidden {
+    if hidden {
+        if let Some(control) = env.objc.try_borrow::<ui_control::UIControlHostObject>(this) {
+            let close_panel_sel = env.objc.lookup_selector("closePanel");
+            let close_panel_colon_sel = env.objc.lookup_selector("closePanel:");
+            let has_close_panel = control.action_targets.iter().any(|&(_target, action, _)| {
+                Some(action) == close_panel_sel
+                    || Some(action) == close_panel_colon_sel
+                    || (!action.is_null() && action.try_as_str(&env.mem).map_or(false, |s| s.trim_end_matches(':') == "closePanel"))
+            });
+            if has_close_panel {
+                return;
+            }
+        }
+    }
     let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
     msg![env; layer setHidden:hidden]
 }
 
-- (())setClipsToBounds:(bool)clips {
-    todo_objc_setter!(this, clips);
-}
 
 - (bool)isOpaque {
     let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
@@ -703,8 +885,8 @@ pub const CLASSES: ClassExports = objc_classes! {
 
     let ui_view_class = env.objc.get_known_class("UIView", &mut env.mem);
 
-    let draw_layer_sel = env.objc.lookup_selector("drawLayer:inContext:").unwrap();
-    let draw_rect_sel = env.objc.lookup_selector("drawRect:").unwrap();
+    let draw_layer_sel = env.objc.register_host_selector("drawLayer:inContext:".to_string(), &mut env.mem);
+    let draw_rect_sel = env.objc.register_host_selector("drawRect:".to_string(), &mut env.mem);
 
     if env
         .objc
@@ -724,7 +906,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 - (())setBounds:(CGRect)bounds {
     let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
-    msg![env; layer setBounds:bounds]
+    () = msg![env; layer setBounds:bounds];
+    if let Some(host) = env.objc.try_borrow_mut::<UIViewHostObject>(this) {
+        host.needs_layout = true;
+    }
 }
 - (CGPoint)center {
     // FIXME: what happens if [layer anchorPoint] isn't (0.5, 0.5)?
@@ -741,7 +926,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 - (())setFrame:(CGRect)frame {
     let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
-    msg![env; layer setFrame:frame]
+    () = msg![env; layer setFrame:frame];
+    if let Some(host) = env.objc.try_borrow_mut::<UIViewHostObject>(this) {
+        host.needs_layout = true;
+    }
 }
 - (CGAffineTransform)transform {
     let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
@@ -904,7 +1092,11 @@ pub const CLASSES: ClassExports = objc_classes! {
     size
 }
 - (())sizeToFit {
-    log!("TODO: [(UIView *){:?} sizeToFit]", this);
+    let bounds: CGRect = msg![env; this bounds];
+    let new_size: CGSize = msg![env; this sizeThatFits:(bounds.size)];
+    let mut frame: CGRect = msg![env; this frame];
+    frame.size = new_size;
+    let _: () = msg![env; this setFrame:frame];
 }
 
 - (())setContentScaleFactor:(CGFloat)factor {

@@ -843,6 +843,85 @@ impl Environment {
         Ok(env)
     }
 
+    #[cfg(test)]
+    pub fn new_for_test() -> Result<Environment, String> {
+        if ENVIRONMENT_INSTANCE_EXISTS.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("Only one (real) Environment can exist at a time!".to_string());
+        }
+        ENVIRONMENT_INSTANCE_EXISTS.store(true, std::sync::atomic::Ordering::Relaxed);
+        let (bundle, fs) = if let Ok(bundle_data) = fs::BundleData::open_any(std::path::Path::new("../touchHLE/touchHLE_apps/MapleCC.app"))
+            .or_else(|_| fs::BundleData::open_any(std::path::Path::new("../extracted/Payload/MapleCC.app")))
+        {
+            bundle::Bundle::new_bundle_and_fs_from_host_path(bundle_data, true).unwrap_or_else(|_| {
+                (bundle::Bundle::new_fake_bundle(), fs::Fs::new_fake_fs())
+            })
+        } else {
+            (bundle::Bundle::new_fake_bundle(), fs::Fs::new_fake_fs())
+        };
+
+        let startup_time = Instant::now();
+        let mut options = options::Options::default();
+        options.headless = true;
+
+        let mut mem = mem::Mem::new();
+        let bins = Vec::new();
+        let mut objc = objc::ObjC::new();
+
+        let mut dyld = dyld::Dyld::new();
+        dyld.do_initial_linking_with_no_bins(&mut mem, &mut objc);
+
+        let cpu = cpu::Cpu::new(None);
+
+        let main_thread = Thread {
+            state: ThreadState::Running,
+            blocked_by: ThreadBlock::NotBlocked,
+            return_value: None,
+            guest_context: None,
+            host_context: None,
+            stack: Some(mem::Mem::MAIN_THREAD_STACK_LOW_END..=0u32.wrapping_sub(1)),
+            framework_state: Default::default(),
+        };
+
+        let mut env = Environment {
+            startup_time,
+            bundle: NullableBox::new(bundle),
+            fs: NullableBox::new(fs),
+            window: None,
+            openal_manager: NullableBox::new(OpenALManager::new()?),
+            mem: NullableBox::new(mem),
+            bins,
+            objc: NullableBox::new(objc),
+            dyld: NullableBox::new(dyld),
+            cpu: NullableBox::new(cpu),
+            current_thread: 0,
+            threads: vec![main_thread],
+            libc_state: Default::default(),
+            mutex_state: Default::default(),
+            framework_state: Default::default(),
+            options: NullableBox::new(options),
+            gdb_server: None,
+            env_vars: Default::default(),
+            dump_file: None,
+            is_app_picker: true,
+            yielder: std::ptr::null(),
+            remaining_ticks: None,
+            panic_cell: Rc::new(Cell::new(None)),
+        };
+
+        env.set_up_initial_env_vars();
+
+        {
+            let argv = &[];
+            let envp = &[];
+            let apple = &[];
+            stack::prep_stack_for_start(&mut env.mem, &mut env.cpu, argv, envp, apple);
+        }
+
+        env.cpu.set_cpsr(cpu::Cpu::CPSR_USER_MODE);
+
+        Ok(env)
+    }
+
     /// Create a new Environment to swap with.
     ///
     /// SAFETY: You must *NEVER, IN ANY CIRCUMSTANCE* dereference any fields or

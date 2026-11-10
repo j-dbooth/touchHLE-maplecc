@@ -18,13 +18,14 @@ use super::cg_image::{
     self, kCGBitmapAlphaInfoMask, kCGBitmapByteOrderMask, kCGImageAlphaFirst, kCGImageAlphaLast,
     kCGImageAlphaNone, kCGImageAlphaNoneSkipFirst, kCGImageAlphaNoneSkipLast, kCGImageAlphaOnly,
     kCGImageAlphaPremultipliedFirst, kCGImageAlphaPremultipliedLast, kCGImageByteOrder32Big,
-    kCGImageByteOrderDefault, CGBitmapInfo, CGImageAlphaInfo, CGImageRef,
+    kCGImageByteOrder32Little, kCGImageByteOrderDefault, CGBitmapInfo, CGImageAlphaInfo,
+    CGImageByteOrderInfo, CGImageRef,
 };
 use super::{CGFloat, CGPoint, CGRect};
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::image::{gamma_decode, gamma_encode, Image};
 use crate::mem::{GuestUSize, Mem, MutVoidPtr, Ptr};
-use crate::objc::ObjC;
+use crate::objc::{nil, ObjC};
 use crate::Environment;
 
 #[derive(Copy, Clone)]
@@ -37,6 +38,7 @@ pub(super) struct CGBitmapContextData {
     bytes_per_row: GuestUSize,
     color_space: &'static str,
     alpha_info: CGImageAlphaInfo,
+    byte_order: CGImageByteOrderInfo,
 }
 
 pub fn CGBitmapContextCreate(
@@ -51,11 +53,29 @@ pub fn CGBitmapContextCreate(
 ) -> CGContextRef {
     assert!(bits_per_component == 8); // TODO: support other bit depths
 
-    let color_space = env.objc.borrow::<CGColorSpaceHostObject>(color_space).name;
+    if width == 0 || height == 0 {
+        return nil;
+    }
+
+    let color_space = if color_space.is_null() {
+        if (bitmap_info & kCGBitmapAlphaInfoMask) == kCGImageAlphaOnly {
+            kCGColorSpaceGenericGray
+        } else {
+            return nil;
+        }
+    } else {
+        env.objc.borrow::<CGColorSpaceHostObject>(color_space).name
+    };
 
     let component_count = match color_space {
-        kCGColorSpaceGenericRGB => components_for_rgb(bitmap_info).unwrap(),
-        kCGColorSpaceGenericGray => components_for_gray(bitmap_info).unwrap(),
+        kCGColorSpaceGenericRGB => match components_for_rgb(bitmap_info) {
+            Ok(count) => count,
+            Err(()) => return nil,
+        },
+        kCGColorSpaceGenericGray => match components_for_gray(bitmap_info) {
+            Ok(count) => count,
+            Err(()) => return nil,
+        },
         _ => unimplemented!("support other color spaces"),
     };
 
@@ -83,6 +103,7 @@ pub fn CGBitmapContextCreate(
             bytes_per_row,
             color_space,
             alpha_info: bitmap_info & kCGBitmapAlphaInfoMask,
+            byte_order: bitmap_info & kCGBitmapByteOrderMask,
         }),
         // TODO: is this the correct default?
         rgb_fill_color: (0.0, 0.0, 0.0, 0.0),
@@ -124,27 +145,63 @@ fn CGBitmapContextGetBytesPerRow(env: &mut Environment, context: CGContextRef) -
     bitmap_data.bytes_per_row
 }
 
+pub(super) fn convert_bitmap_context_pixels_to_rgba(
+    data: &CGBitmapContextData,
+    raw_bytes: &[u8],
+) -> Vec<u8> {
+    let bpp = bytes_per_pixel(data) as usize;
+    let offsets = pixel_offsets(data);
+    let mut pixels = Vec::with_capacity((data.width * data.height * 4) as usize);
+    for y in 0..data.height {
+        let row_start = (y * data.bytes_per_row) as usize;
+        for x in 0..data.width {
+            let pixel_idx = row_start + (x as usize) * bpp;
+            let (r, g, b, a) = if data.alpha_info == kCGImageAlphaOnly {
+                (0, 0, 0, raw_bytes[pixel_idx])
+            } else {
+                let r = raw_bytes[pixel_idx + offsets.0];
+                let g = raw_bytes[pixel_idx + offsets.1];
+                let b = raw_bytes[pixel_idx + offsets.2];
+                let a = if let Some(a_offset) = offsets.3 {
+                    raw_bytes[pixel_idx + a_offset]
+                } else {
+                    0xFF
+                };
+                let (r, g, b) = if matches!(
+                    data.alpha_info,
+                    kCGImageAlphaLast | kCGImageAlphaFirst
+                ) && a != 0xFF
+                {
+                    let a_factor = a as f32 / 255.0;
+                    (
+                        (r as f32 * a_factor).round() as u8,
+                        (g as f32 * a_factor).round() as u8,
+                        (b as f32 * a_factor).round() as u8,
+                    )
+                } else {
+                    (r, g, b)
+                };
+                (r, g, b, a)
+            };
+            pixels.extend_from_slice(&[r, g, b, a]);
+        }
+    }
+    pixels
+}
+
 pub fn CGBitmapContextCreateImage(env: &mut Environment, context: CGContextRef) -> CGImageRef {
     // TODO: Image::from_pixel_vec() should not exist, and this function should
     // support any bitmap format.
     let host_obj = env.objc.borrow::<CGContextHostObject>(context);
     let CGContextSubclass::CGBitmapContext(bitmap_data) = host_obj.subclass;
-    assert!(
-        bitmap_data.bits_per_component == 8
-            && bitmap_data.bytes_per_row == bitmap_data.width * 4
-            && bitmap_data.color_space == kCGColorSpaceGenericRGB
-            && matches!(
-                bitmap_data.alpha_info,
-                kCGImageAlphaNoneSkipLast | kCGImageAlphaPremultipliedLast
-            )
-    );
-    let pixels = env
+    assert_eq!(bitmap_data.bits_per_component, 8);
+    let raw_bytes = env
         .mem
         .bytes_at(
             bitmap_data.data.cast(),
             bitmap_data.bytes_per_row * bitmap_data.height,
-        )
-        .to_vec();
+        );
+    let pixels = convert_bitmap_context_pixels_to_rgba(&bitmap_data, raw_bytes);
     cg_image::from_image(
         env,
         Image::from_pixel_vec(pixels, (bitmap_data.width, bitmap_data.height)),
@@ -153,7 +210,10 @@ pub fn CGBitmapContextCreateImage(env: &mut Environment, context: CGContextRef) 
 
 fn components_for_rgb(bitmap_info: CGBitmapInfo) -> Result<GuestUSize, ()> {
     let byte_order = bitmap_info & kCGBitmapByteOrderMask;
-    if byte_order != kCGImageByteOrderDefault && byte_order != kCGImageByteOrder32Big {
+    if byte_order != kCGImageByteOrderDefault
+        && byte_order != kCGImageByteOrder32Big
+        && byte_order != kCGImageByteOrder32Little
+    {
         return Err(()); // TODO: handle other byte orders
     }
 
@@ -162,7 +222,13 @@ fn components_for_rgb(bitmap_info: CGBitmapInfo) -> Result<GuestUSize, ()> {
         return Err(()); // TODO: handle other cases (float)
     }
     match alpha_info & kCGBitmapAlphaInfoMask {
-        kCGImageAlphaNone => Ok(3), // RGB
+        kCGImageAlphaNone => {
+            if byte_order == kCGImageByteOrder32Big || byte_order == kCGImageByteOrder32Little {
+                Ok(4)
+            } else {
+                Ok(3)
+            }
+        }
         kCGImageAlphaPremultipliedLast
         | kCGImageAlphaPremultipliedFirst
         | kCGImageAlphaLast
@@ -176,7 +242,10 @@ fn components_for_rgb(bitmap_info: CGBitmapInfo) -> Result<GuestUSize, ()> {
 
 fn components_for_gray(bitmap_info: CGBitmapInfo) -> Result<GuestUSize, ()> {
     let byte_order = bitmap_info & kCGBitmapByteOrderMask;
-    if byte_order != kCGImageByteOrderDefault && byte_order != kCGImageByteOrder32Big {
+    if byte_order != kCGImageByteOrderDefault
+        && byte_order != kCGImageByteOrder32Big
+        && byte_order != kCGImageByteOrder32Little
+    {
         return Err(()); // TODO: handle other byte orders
     }
 
@@ -202,12 +271,25 @@ fn bytes_per_pixel(data: &CGBitmapContextData) -> GuestUSize {
         bits_per_component,
         color_space,
         alpha_info,
+        byte_order,
+        width,
+        bytes_per_row,
         ..
     } = data;
     assert!(bits_per_component == 8);
     match color_space {
-        kCGColorSpaceGenericRGB => components_for_rgb(alpha_info).unwrap(),
-        kCGColorSpaceGenericGray => components_for_gray(alpha_info).unwrap(),
+        kCGColorSpaceGenericRGB => {
+            if alpha_info == kCGImageAlphaNone
+                && (byte_order == kCGImageByteOrder32Little
+                    || byte_order == kCGImageByteOrder32Big
+                    || (width > 0 && bytes_per_row >= width * 4))
+            {
+                4
+            } else {
+                components_for_rgb(alpha_info | byte_order).unwrap()
+            }
+        }
+        kCGColorSpaceGenericGray => components_for_gray(alpha_info | byte_order).unwrap(),
         _ => unimplemented!("support other color spaces"),
     }
 }
@@ -287,7 +369,7 @@ fn blend_premultiplied(
 fn pixel_offsets(data: &CGBitmapContextData) -> (usize, usize, usize, Option<usize>) {
     match data.color_space {
         kCGColorSpaceGenericRGB => {
-            match data.alpha_info {
+            let (r, g, b, a) = match data.alpha_info {
                 kCGImageAlphaNone => (0, 1, 2, None),
                 kCGImageAlphaPremultipliedLast | kCGImageAlphaLast => (0, 1, 2, Some(3)),
                 kCGImageAlphaPremultipliedFirst | kCGImageAlphaFirst => (1, 2, 3, Some(0)),
@@ -295,6 +377,11 @@ fn pixel_offsets(data: &CGBitmapContextData) -> (usize, usize, usize, Option<usi
                 kCGImageAlphaNoneSkipFirst => (1, 2, 3, None),
                 kCGImageAlphaOnly => (0, 0, 0, Some(0)),
                 _ => unreachable!(), // checked by bytes_per_pixel
+            };
+            if data.byte_order == kCGImageByteOrder32Little && bytes_per_pixel(data) == 4 {
+                (3 - r, 3 - g, 3 - b, a.map(|idx| 3 - idx))
+            } else {
+                (r, g, b, a)
             }
         }
         kCGColorSpaceGenericGray => {
@@ -548,6 +635,7 @@ fn test_iter_transformed_pixels() {
                 bytes_per_row: 3 * width,
                 color_space: "kCGColorSpaceGenericRGB",
                 alpha_info: 0,
+                byte_order: kCGImageByteOrderDefault,
             },
             rgb_fill_color: (0.0, 0.0, 0.0, 0.0),
             blend_mode: kCGBlendModeNormal,
@@ -709,3 +797,302 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CGBitmapContextGetHeight(_)),
     export_c_func!(CGBitmapContextGetBytesPerRow(_)),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bitmap_context_components_and_bytes_per_pixel() {
+        // 0x2001: kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedLast
+        let info_32little_premul_last = kCGImageByteOrder32Little | kCGImageAlphaPremultipliedLast;
+        assert_eq!(components_for_rgb(info_32little_premul_last), Ok(4));
+        assert_eq!(components_for_gray(info_32little_premul_last), Ok(2));
+
+        // 0x2006: kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst
+        let info_32little_skip_first = kCGImageByteOrder32Little | kCGImageAlphaNoneSkipFirst;
+        assert_eq!(components_for_rgb(info_32little_skip_first), Ok(4));
+
+        // 0: kCGImageByteOrderDefault | kCGImageAlphaNone
+        assert_eq!(components_for_rgb(0), Ok(3));
+        assert_eq!(components_for_gray(0), Ok(1));
+
+        // 32-bit Little and Big with AlphaNone must return 4 components (32-bit word)
+        let info_32little_alpha_none = kCGImageByteOrder32Little | kCGImageAlphaNone;
+        assert_eq!(components_for_rgb(info_32little_alpha_none), Ok(4));
+        let info_32big_alpha_none = kCGImageByteOrder32Big | kCGImageAlphaNone;
+        assert_eq!(components_for_rgb(info_32big_alpha_none), Ok(4));
+
+        // Alpha only
+        assert_eq!(components_for_gray(kCGImageAlphaOnly), Ok(1));
+
+        // Test bytes_per_pixel with 32bpp alpha none (width * 4 bytes per row)
+        let data_rgbx = CGBitmapContextData {
+            data: Ptr::null(),
+            data_is_owned: false,
+            width: 10,
+            height: 10,
+            bits_per_component: 8,
+            bytes_per_row: 40,
+            color_space: kCGColorSpaceGenericRGB,
+            alpha_info: kCGImageAlphaNone,
+            byte_order: kCGImageByteOrderDefault,
+        };
+        assert_eq!(bytes_per_pixel(&data_rgbx), 4);
+
+        // Test bytes_per_pixel with 32-little alpha none regardless of bytes_per_row
+        let data_32little_none = CGBitmapContextData {
+            data: Ptr::null(),
+            data_is_owned: false,
+            width: 10,
+            height: 10,
+            bits_per_component: 8,
+            bytes_per_row: 40,
+            color_space: kCGColorSpaceGenericRGB,
+            alpha_info: kCGImageAlphaNone,
+            byte_order: kCGImageByteOrder32Little,
+        };
+        assert_eq!(bytes_per_pixel(&data_32little_none), 4);
+
+        // Test bytes_per_pixel with padded rows (bytes_per_row > width * 4)
+        let data_rgbx_padded = CGBitmapContextData {
+            bytes_per_row: 64, // 10 * 4 = 40, padded to 64
+            ..data_rgbx
+        };
+        assert_eq!(bytes_per_pixel(&data_rgbx_padded), 4);
+
+        // 24bpp RGB
+        let data_rgb24 = CGBitmapContextData {
+            data: Ptr::null(),
+            data_is_owned: false,
+            width: 10,
+            height: 10,
+            bits_per_component: 8,
+            bytes_per_row: 30,
+            color_space: kCGColorSpaceGenericRGB,
+            alpha_info: kCGImageAlphaNone,
+            byte_order: kCGImageByteOrderDefault,
+        };
+        assert_eq!(bytes_per_pixel(&data_rgb24), 3);
+    }
+
+    #[test]
+    fn test_pixel_offsets_for_sepia_32little() {
+        // 0x2001: kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedLast
+        let data_sepia = CGBitmapContextData {
+            data: Ptr::null(),
+            data_is_owned: false,
+            width: 2,
+            height: 2,
+            bits_per_component: 8,
+            bytes_per_row: 8,
+            color_space: kCGColorSpaceGenericRGB,
+            alpha_info: kCGImageAlphaPremultipliedLast,
+            byte_order: kCGImageByteOrder32Little,
+        };
+
+        let offsets = pixel_offsets(&data_sepia);
+        // Offsets in [A, B, G, R] format:
+        // Byte 0: A (Some(0))
+        // Byte 1: B (offsets.2 = 1)
+        // Byte 2: G (offsets.1 = 2)
+        // Byte 3: R (offsets.0 = 3)
+        assert_eq!(offsets, (3, 2, 1, Some(0)));
+
+        // Big-endian / default byte order should be (0, 1, 2, Some(3))
+        let data_big = CGBitmapContextData {
+            byte_order: kCGImageByteOrderDefault,
+            ..data_sepia
+        };
+        assert_eq!(pixel_offsets(&data_big), (0, 1, 2, Some(3)));
+    }
+
+    #[test]
+    fn test_put_get_pixel_32little_channel_order() {
+        let data = CGBitmapContextData {
+            data: Ptr::null(),
+            data_is_owned: false,
+            width: 1,
+            height: 1,
+            bits_per_component: 8,
+            bytes_per_row: 4,
+            color_space: kCGColorSpaceGenericRGB,
+            alpha_info: kCGImageAlphaPremultipliedLast,
+            byte_order: kCGImageByteOrder32Little,
+        };
+
+        let mut buffer = [0u8; 4];
+        // Put a pixel with pure colors: R=1.0, G=0.0, B=0.0, A=1.0
+        put_pixel(
+            &data,
+            &mut buffer,
+            (0, 0),
+            (1.0, 0.0, 0.0, 1.0),
+            false,
+            kCGBlendModeNormal,
+        );
+        // In 32-little premultiplied last: [A, B, G, R]
+        // Byte 0: A = 0xFF
+        // Byte 1: B = 0x00
+        // Byte 2: G = 0x00
+        // Byte 3: R = 0xFF
+        assert_eq!(buffer, [0xFF, 0x00, 0x00, 0xFF]);
+
+        // Get the pixel back and check RGBA
+        let got = get_pixel(&data, &mut buffer, 0);
+        assert!((got.0 - 1.0).abs() < 0.01, "R should be 1.0, got {}", got.0);
+        assert!(got.1 < 0.01, "G should be 0.0, got {}", got.1);
+        assert!(got.2 < 0.01, "B should be 0.0, got {}", got.2);
+        assert!((got.3 - 1.0).abs() < 0.01, "A should be 1.0, got {}", got.3);
+    }
+
+    #[test]
+    fn test_sepia_loop_and_image_conversion_end_to_end() {
+        // Simulate the exact MapleStory death crash sequence:
+        // 1. CGBitmapContext with bitmap_info = 0x2001 (kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedLast)
+        let data = CGBitmapContextData {
+            data: Ptr::null(),
+            data_is_owned: false,
+            width: 2,
+            height: 1,
+            bits_per_component: 8,
+            bytes_per_row: 8,
+            color_space: kCGColorSpaceGenericRGB,
+            alpha_info: kCGImageAlphaPremultipliedLast,
+            byte_order: kCGImageByteOrder32Little,
+        };
+
+        let mut buffer = vec![0u8; 8];
+
+        // 2. CGContextDrawImage writes pixels into the context (calling put_pixel)
+        // Pixel 0: linear color (0.8, 0.6, 0.4, 1.0)
+        put_pixel(
+            &data,
+            &mut buffer,
+            (0, 0),
+            (0.8, 0.6, 0.4, 1.0),
+            false,
+            kCGBlendModeNormal,
+        );
+        // Pixel 1: linear color (0.2, 0.4, 0.6, 0.5)
+        put_pixel(
+            &data,
+            &mut buffer,
+            (1, 0),
+            (0.2, 0.4, 0.6, 0.5),
+            false,
+            kCGBlendModeNormal,
+        );
+
+        // Verify buffer has [A, B, G, R] for each pixel:
+        // Byte 0 is A, Byte 1 is B, Byte 2 is G, Byte 3 is R
+        let p0_a = buffer[0];
+        let p0_b = buffer[1];
+        let p0_g = buffer[2];
+        let p0_r = buffer[3];
+        assert_eq!(p0_a, 255); // Alpha is 1.0
+        assert!(p0_b > 0 && p0_g > 0 && p0_r > 0);
+
+        // 3. +[MDGame convertToSepia:] executes the guest ARM loop:
+        // It skips byte 0 (alpha) and modifies byte 1 (B), byte 2 (G), byte 3 (R):
+        for chunk in buffer.chunks_exact_mut(4) {
+            let b = chunk[1] as f32;
+            let g = chunk[2] as f32;
+            let r = chunk[3] as f32;
+            // Sepia transformation formula:
+            let sepia_r = (r * 0.393 + g * 0.769 + b * 0.189).min(255.0) as u8;
+            let sepia_g = (r * 0.349 + g * 0.686 + b * 0.168).min(255.0) as u8;
+            let sepia_b = (r * 0.272 + g * 0.534 + b * 0.131).min(255.0) as u8;
+            chunk[1] = sepia_b;
+            chunk[2] = sepia_g;
+            chunk[3] = sepia_r;
+        }
+
+        // 4. CGBitmapContextCreateImage converts the [A, B, G, R] buffer back to [R, G, B, A]
+        let rgba_pixels = convert_bitmap_context_pixels_to_rgba(&data, &buffer);
+        assert_eq!(rgba_pixels.len(), 8);
+
+        // Pixel 0 check:
+        // rgba_pixels[0] is R (from chunk[3])
+        // rgba_pixels[1] is G (from chunk[2])
+        // rgba_pixels[2] is B (from chunk[1])
+        // rgba_pixels[3] is A (from chunk[0])
+        assert_eq!(rgba_pixels[0], buffer[3]);
+        assert_eq!(rgba_pixels[1], buffer[2]);
+        assert_eq!(rgba_pixels[2], buffer[1]);
+        assert_eq!(rgba_pixels[3], buffer[0]);
+
+        // Pixel 1 check:
+        assert_eq!(rgba_pixels[4], buffer[7]);
+        assert_eq!(rgba_pixels[5], buffer[6]);
+        assert_eq!(rgba_pixels[6], buffer[5]);
+        assert_eq!(rgba_pixels[7], buffer[4]);
+    }
+
+    #[test]
+    fn test_convert_bitmap_context_pixels_gray_and_alpha_only() {
+        let gray_data = CGBitmapContextData {
+            data: Ptr::null(),
+            data_is_owned: false,
+            width: 2,
+            height: 1,
+            bits_per_component: 8,
+            bytes_per_row: 2,
+            color_space: kCGColorSpaceGenericGray,
+            alpha_info: kCGImageAlphaNone,
+            byte_order: kCGImageByteOrderDefault,
+        };
+        let gray_buf = [128u8, 200u8];
+        let gray_rgba = convert_bitmap_context_pixels_to_rgba(&gray_data, &gray_buf);
+        assert_eq!(
+            gray_rgba,
+            vec![128, 128, 128, 0xFF, 200, 200, 200, 0xFF]
+        );
+
+        let alpha_only_data = CGBitmapContextData {
+            data: Ptr::null(),
+            data_is_owned: false,
+            width: 2,
+            height: 1,
+            bits_per_component: 8,
+            bytes_per_row: 2,
+            color_space: kCGColorSpaceGenericGray,
+            alpha_info: kCGImageAlphaOnly,
+            byte_order: kCGImageByteOrderDefault,
+        };
+        let alpha_buf = [0x55u8, 0xAAu8];
+        let alpha_rgba = convert_bitmap_context_pixels_to_rgba(&alpha_only_data, &alpha_buf);
+        assert_eq!(
+            alpha_rgba,
+            vec![0, 0, 0, 0x55, 0, 0, 0, 0xAA]
+        );
+    }
+
+    #[test]
+    fn test_convert_bitmap_context_pixels_straight_alpha_premultiplied() {
+        // Straight alpha (kCGImageAlphaLast): 50% opacity (128) should halve the RGB values.
+        let straight_alpha_data = CGBitmapContextData {
+            data: Ptr::null(),
+            data_is_owned: false,
+            width: 1,
+            height: 1,
+            bits_per_component: 8,
+            bytes_per_row: 4,
+            color_space: kCGColorSpaceGenericRGB,
+            alpha_info: kCGImageAlphaLast,
+            byte_order: kCGImageByteOrderDefault,
+        };
+        let buf = [200u8, 100u8, 50u8, 128u8]; // [R, G, B, A] straight
+        let rgba = convert_bitmap_context_pixels_to_rgba(&straight_alpha_data, &buf);
+        // Premultiplied:
+        // R: 200 * (128 / 255) = 100
+        // G: 100 * (128 / 255) = 50
+        // B: 50 * (128 / 255) = 25
+        // A: 128
+        assert_eq!(rgba[3], 128);
+        assert!((rgba[0] as i32 - 100).abs() <= 1);
+        assert!((rgba[1] as i32 - 50).abs() <= 1);
+        assert!((rgba[2] as i32 - 25).abs() <= 1);
+    }
+}
+

@@ -5,9 +5,10 @@
  */
 //! The `NSValue` class cluster, including `NSNumber`.
 
-use super::ns_string::{from_rust_ordering, from_rust_string};
+use super::ns_string::{from_rust_ordering, from_rust_string, get_static_str};
 use super::{
     _nib_archive_decoder, ns_keyed_unarchiver, NSComparisonResult, NSOrderedSame, NSUInteger,
+    NSRange,
 };
 use crate::frameworks::core_foundation::cf_number::{
     kCFNumberCharType, kCFNumberFloat32Type, kCFNumberFloatType, kCFNumberIntType,
@@ -29,6 +30,7 @@ pub(super) enum NSValueHostObject {
     CGPoint(CGPoint),
     CGSize(CGSize),
     CGRect(CGRect),
+    Range(NSRange),
 }
 impl HostObject for NSValueHostObject {}
 
@@ -53,7 +55,7 @@ macro_rules! impl_AsValue {
 }
 
 #[derive(Debug)]
-pub(super) enum NSNumberHostObject {
+pub(crate) enum NSNumberHostObject {
     Bool(bool),
     UnsignedLongLong(u64),
     UnsignedInt(u32),
@@ -131,6 +133,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     autorelease(env, new)
 }
 
++ (id)valueWithRange:(NSRange)value {
+    let host_object = Box::new(NSValueHostObject::Range(value));
+    let new = env.objc.alloc_object(this, host_object, &mut env.mem);
+    autorelease(env, new)
+}
+
 - (CGPoint)CGPointValue {
     let host_object = env.objc.borrow::<NSValueHostObject>(this);
     match host_object {
@@ -151,6 +159,14 @@ pub const CLASSES: ClassExports = objc_classes! {
     let host_object = env.objc.borrow::<NSValueHostObject>(this);
     match host_object {
         NSValueHostObject::CGRect(cg_rect) => *cg_rect,
+        _ => unimplemented!()
+    }
+}
+
+- (NSRange)rangeValue {
+    let host_object = env.objc.borrow::<NSValueHostObject>(this);
+    match host_object {
+        NSValueHostObject::Range(range) => *range,
         _ => unimplemented!()
     }
 }
@@ -295,7 +311,26 @@ pub const CLASSES: ClassExports = objc_classes! {
     } else if env.objc.class_is_subclass_of(class, nib_archive_class) {
         _nib_archive_decoder::decode_current_number(env, coder)
     } else {
-        unimplemented!();
+        let real_key = get_static_str(env, "NS.realval");
+        let dbl_key = get_static_str(env, "NS.dblval");
+        let int_key = get_static_str(env, "NS.intval");
+        let bool_key = get_static_str(env, "NS.boolval");
+        let num = msg_class![env; NSNumber alloc];
+        if msg![env; coder containsValueForKey:dbl_key] {
+            let val: f64 = msg![env; coder decodeDoubleForKey:dbl_key];
+            msg![env; num initWithDouble:val]
+        } else if msg![env; coder containsValueForKey:real_key] {
+            let val: f64 = msg![env; coder decodeDoubleForKey:real_key];
+            msg![env; num initWithDouble:val]
+        } else if msg![env; coder containsValueForKey:int_key] {
+            let val: i64 = msg![env; coder decodeInt64ForKey:int_key];
+            msg![env; num initWithLongLong:val]
+        } else if msg![env; coder containsValueForKey:bool_key] {
+            let val: bool = msg![env; coder decodeBoolForKey:bool_key];
+            msg![env; num initWithBool:val]
+        } else {
+            msg![env; num initWithInt:0]
+        }
     };
     release(env, this);
     new_num
@@ -304,9 +339,15 @@ pub const CLASSES: ClassExports = objc_classes! {
     let host_object = env.objc.borrow::<NSNumberHostObject>(this);
     let (key, val) = match host_object {
         NSNumberHostObject::Int(i) => ("NS.intval", plist::Value::Integer((*i).into())),
+        NSNumberHostObject::Short(s) => ("NS.intval", plist::Value::Integer((*s as i64).into())),
+        NSNumberHostObject::UnsignedShort(us) => ("NS.intval", plist::Value::Integer((*us as i64).into())),
+        NSNumberHostObject::Char(c) => ("NS.intval", plist::Value::Integer((*c as i64).into())),
+        NSNumberHostObject::UnsignedInt(u) => ("NS.intval", plist::Value::Integer((*u as i64).into())),
+        NSNumberHostObject::LongLong(ll) => ("NS.intval", plist::Value::Integer((*ll).into())),
+        NSNumberHostObject::UnsignedLongLong(ull) => ("NS.intval", plist::Value::Integer((*ull as i64).into())),
         NSNumberHostObject::Double(d) => ("NS.dblval", plist::Value::Real(*d)),
+        NSNumberHostObject::Float(f) => ("NS.dblval", plist::Value::Real(*f as f64)),
         NSNumberHostObject::Bool(b) => ("NS.boolval", plist::Value::Boolean(*b)),
-        _ => unimplemented!("{:?}", host_object)
     };
 
     let scope = get_value_to_encode_for_current_key(env, coder);
@@ -451,7 +492,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         NSNumberHostObject::UnsignedShort(_) => from_rust_string(env, "%hu".to_string()),
     };
     let ns_string_class = env.objc.get_known_class("NSString", &mut env.mem);
-    let sel = env.objc.lookup_selector("stringWithFormat:").unwrap();
+    let sel = env.objc.register_host_selector("stringWithFormat:".to_string(), &mut env.mem);
     // TODO: type info for host-to-host message calls with var-args
     let res = match env.objc.borrow(this) {
         NSNumberHostObject::Bool(value) => crate::objc::msg_send_no_type_checking(env, (ns_string_class, sel, format, *value as i32)),
@@ -529,6 +570,53 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 // TODO: accessors etc
+
+@end
+
+@implementation NSDecimalNumber: NSNumber
+
++ (id)allocWithZone:(NSZonePtr)_zone {
+    let host_object = Box::new(NSNumberHostObject::Int(0));
+    env.objc.alloc_object(this, host_object, &mut env.mem)
+}
+
++ (id)decimalNumberWithString:(id)numericString {
+    if numericString == nil {
+        return msg![env; this zero];
+    }
+    let s = super::ns_string::to_rust_string(env, numericString);
+    if let Ok(i) = s.parse::<i32>() {
+        let new: id = msg![env; this alloc];
+        let new: id = msg![env; new initWithInt:i];
+        autorelease(env, new)
+    } else if let Ok(f) = s.parse::<f64>() {
+        let new: id = msg![env; this alloc];
+        let new: id = msg![env; new initWithDouble:f];
+        autorelease(env, new)
+    } else {
+        let new: id = msg![env; this alloc];
+        let new: id = msg![env; new initWithInt:0];
+        autorelease(env, new)
+    }
+}
+
++ (id)decimalNumberWithDecimal:(crate::mem::ConstVoidPtr)_d {
+    let new: id = msg![env; this alloc];
+    let new: id = msg![env; new initWithInt:0];
+    autorelease(env, new)
+}
+
++ (id)zero {
+    let new: id = msg![env; this alloc];
+    let new: id = msg![env; new initWithInt:0];
+    autorelease(env, new)
+}
+
++ (id)one {
+    let new: id = msg![env; this alloc];
+    let new: id = msg![env; new initWithInt:1];
+    autorelease(env, new)
+}
 
 @end
 

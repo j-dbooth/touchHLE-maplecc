@@ -36,6 +36,12 @@ const PNG_MAGIC_NUMBER: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 
 impl Image {
     pub fn from_bytes(bytes: &[u8]) -> Result<Image, String> {
+        if (bytes.starts_with(b"MM\x00*") || bytes.starts_with(b"II*\x00")) && bytes.len() >= 8 {
+            if let Some(img) = decode_simple_tiff(bytes) {
+                return Ok(img);
+            }
+        }
+
         let len: c_int = bytes.len().try_into().unwrap();
 
         let mut x: c_int = 0;
@@ -274,3 +280,172 @@ pub fn decode_pvrtc(pvrtc_data: &[u8], is_2bit: bool, width: u32, height: u32) -
     };
     rgba8_data
 }
+
+fn decode_simple_tiff(bytes: &[u8]) -> Option<Image> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    let is_be = match &bytes[..2] {
+        b"MM" => true,
+        b"II" => false,
+        _ => return None,
+    };
+    let magic = if is_be {
+        u16::from_be_bytes(bytes[2..4].try_into().ok()?)
+    } else {
+        u16::from_le_bytes(bytes[2..4].try_into().ok()?)
+    };
+    if magic != 42 {
+        return None;
+    }
+    let ifd_offset = if is_be {
+        u32::from_be_bytes(bytes[4..8].try_into().ok()?) as usize
+    } else {
+        u32::from_le_bytes(bytes[4..8].try_into().ok()?) as usize
+    };
+    if ifd_offset + 2 > bytes.len() {
+        return None;
+    }
+    let num_entries = if is_be {
+        u16::from_be_bytes(bytes[ifd_offset..ifd_offset + 2].try_into().ok()?) as usize
+    } else {
+        u16::from_le_bytes(bytes[ifd_offset..ifd_offset + 2].try_into().ok()?) as usize
+    };
+
+    let mut width = 0u32;
+    let mut height = 0u32;
+    let mut strip_offset = 0usize;
+
+    let mut entry_offset = ifd_offset + 2;
+    for _ in 0..num_entries {
+        if entry_offset + 12 > bytes.len() {
+            break;
+        }
+        let tag = if is_be {
+            u16::from_be_bytes(bytes[entry_offset..entry_offset + 2].try_into().ok()?)
+        } else {
+            u16::from_le_bytes(bytes[entry_offset..entry_offset + 2].try_into().ok()?)
+        };
+        let typ = if is_be {
+            u16::from_be_bytes(bytes[entry_offset + 2..entry_offset + 4].try_into().ok()?)
+        } else {
+            u16::from_le_bytes(bytes[entry_offset + 2..entry_offset + 4].try_into().ok()?)
+        };
+        let val_or_offset = if is_be {
+            u32::from_be_bytes(bytes[entry_offset + 8..entry_offset + 12].try_into().ok()?)
+        } else {
+            u32::from_le_bytes(bytes[entry_offset + 8..entry_offset + 12].try_into().ok()?)
+        };
+        entry_offset += 12;
+
+        let val = if typ == 3 {
+            // SHORT
+            if is_be {
+                val_or_offset >> 16
+            } else {
+                val_or_offset & 0xffff
+            }
+        } else {
+            val_or_offset
+        };
+
+        match tag {
+            256 => width = val,
+            257 => height = val,
+            273 => strip_offset = val as usize,
+            _ => {}
+        }
+    }
+
+    if width > 0 && height > 0 && strip_offset > 0 {
+        let expected_len = width as usize * height as usize * 4;
+        if strip_offset + expected_len <= bytes.len() {
+            let pixels = bytes[strip_offset..strip_offset + expected_len].to_vec();
+            return Some(Image::from_pixel_vec(pixels, (width, height)));
+        }
+    }
+    None
+}
+
+fn adler32(data: &[u8]) -> u32 {
+    let mut s1: u32 = 1;
+    let mut s2: u32 = 0;
+    for &b in data {
+        s1 = (s1 + b as u32) % 65521;
+        s2 = (s2 + s1) % 65521;
+    }
+    (s2 << 16) | s1
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xffff_ffff;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = if (crc & 1) != 0 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+pub fn encode_rgba_to_png(width: u32, height: u32, rgba: &[u8], bottom_up: bool) -> Vec<u8> {
+    let mut raw = Vec::with_capacity((width as usize * 4 + 1) * height as usize);
+    let row_len = width as usize * 4;
+    if bottom_up {
+        for y in (0..height as usize).rev() {
+            raw.push(0);
+            raw.extend_from_slice(&rgba[y * row_len..(y + 1) * row_len]);
+        }
+    } else {
+        for y in 0..height as usize {
+            raw.push(0);
+            raw.extend_from_slice(&rgba[y * row_len..(y + 1) * row_len]);
+        }
+    }
+    let adler = adler32(&raw);
+    let mut zlib = vec![0x78, 0x01];
+    let chunk_size = 65535;
+    for (i, chunk) in raw.chunks(chunk_size).enumerate() {
+        let is_last = (i + 1) * chunk_size >= raw.len();
+        zlib.push(if is_last { 0x01 } else { 0x00 });
+        let len = chunk.len() as u16;
+        zlib.extend_from_slice(&len.to_le_bytes());
+        zlib.extend_from_slice(&(!len).to_le_bytes());
+        zlib.extend_from_slice(chunk);
+    }
+    zlib.extend_from_slice(&adler.to_be_bytes());
+
+    fn make_chunk(chunk_type: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + data.len() + 4);
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(chunk_type);
+        out.extend_from_slice(data);
+        let mut crc_buf = Vec::with_capacity(4 + data.len());
+        crc_buf.extend_from_slice(chunk_type);
+        crc_buf.extend_from_slice(data);
+        out.extend_from_slice(&crc32(&crc_buf).to_be_bytes());
+        out
+    }
+
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.push(8);
+    ihdr.push(6);
+    ihdr.push(0);
+    ihdr.push(0);
+    ihdr.push(0);
+
+    let mut file_bytes = Vec::new();
+    file_bytes.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+    file_bytes.extend_from_slice(&make_chunk(b"IHDR", &ihdr));
+    file_bytes.extend_from_slice(&make_chunk(b"IDAT", &zlib));
+    file_bytes.extend_from_slice(&make_chunk(b"IEND", &[]));
+    file_bytes
+}
+
+

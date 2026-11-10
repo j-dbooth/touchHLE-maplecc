@@ -37,18 +37,18 @@ pub const UIControlEventValueChanged: UIControlEvents = 1 << 12;
 pub type UIControlContentVerticalAlignment = NSInteger;
 const UIControlContentVerticalAlignmentCenter: UIControlContentVerticalAlignment = 0;
 
-struct UIControlHostObject {
-    superclass: super::UIViewHostObject,
-    enabled: bool,
-    selected: bool,
-    highlighted: bool,
-    contentVerticalAlignment: UIControlContentVerticalAlignment,
+pub(crate) struct UIControlHostObject {
+    pub(crate) superclass: super::UIViewHostObject,
+    pub(crate) enabled: bool,
+    pub(crate) selected: bool,
+    pub(crate) highlighted: bool,
+    pub(crate) contentVerticalAlignment: UIControlContentVerticalAlignment,
     /// `UITouch*` of the touch currently being tracked, [nil] if none
-    tracked_touch: id,
-    tracking: bool,
+    pub(crate) tracked_touch: id,
+    pub(crate) tracking: bool,
     /// See `addTarget:action:forControlEvents:`. The target is a weak
     /// reference!
-    action_targets: Vec<(id, SEL, UIControlEvents)>,
+    pub(crate) action_targets: Vec<(id, SEL, UIControlEvents)>,
 }
 impl_HostObject_with_superclass!(UIControlHostObject);
 impl Default for UIControlHostObject {
@@ -106,6 +106,16 @@ pub const CLASSES: ClassExports = objc_classes! {
 + (id)allocWithZone:(NSZonePtr)_zone {
     let host_object = Box::<UIControlHostObject>::default();
     env.objc.alloc_object(this, host_object, &mut env.mem)
+}
+
+- (id)initWithCoder:(id)coder {
+    let this: id = msg_super![env; this initWithCoder:coder];
+    let disabled_key = crate::frameworks::foundation::ns_string::get_static_str(env, "UIDisabled");
+    if msg![env; coder containsValueForKey:disabled_key] {
+        let disabled: bool = msg![env; coder decodeBoolForKey:disabled_key];
+        let _: () = msg![env; this setEnabled:(!disabled)];
+    }
+    this
 }
 
 - (())dealloc {

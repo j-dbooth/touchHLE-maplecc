@@ -5,12 +5,13 @@
  */
 //! `UIScrollView`.
 
+pub mod ui_table_view;
 pub mod ui_text_view;
 use crate::frameworks::core_graphics::{CGPoint, CGRect, CGSize};
 use crate::frameworks::foundation::NSInteger;
 use crate::objc::{
-    id, impl_HostObject_with_superclass, msg, nil, objc_classes, todo_objc_setter, ClassExports,
-    NSZonePtr, SEL,
+    id, impl_HostObject_with_superclass, msg, msg_super, nil, objc_classes, todo_objc_setter,
+    ClassExports, NSZonePtr, SEL,
 };
 
 type UIScrollViewIndicatorStyle = NSInteger;
@@ -22,6 +23,7 @@ pub struct UIScrollViewHostObject {
     scroll_enabled: bool,
     content_offset: CGPoint,
     content_size: CGSize,
+    pub is_dragging: bool,
 }
 impl_HostObject_with_superclass!(UIScrollViewHostObject);
 impl Default for UIScrollViewHostObject {
@@ -35,6 +37,7 @@ impl Default for UIScrollViewHostObject {
                 width: 0.0,
                 height: 0.0,
             },
+            is_dragging: false,
         }
     }
 }
@@ -48,6 +51,18 @@ pub const CLASSES: ClassExports = objc_classes! {
 + (id)allocWithZone:(NSZonePtr)_zone {
     let host_object = Box::<UIScrollViewHostObject>::default();
     env.objc.alloc_object(this, host_object, &mut env.mem)
+}
+
+- (id)initWithFrame:(CGRect)frame {
+    let this: id = msg_super![env; this initWithFrame:frame];
+    () = msg![env; this setClipsToBounds:true];
+    this
+}
+
+- (id)initWithCoder:(id)coder {
+    let this: id = msg_super![env; this initWithCoder:coder];
+    () = msg![env; this setClipsToBounds:true];
+    this
 }
 
 - (id)delegate {
@@ -114,6 +129,10 @@ pub const CLASSES: ClassExports = objc_classes! {
     todo_objc_setter!(this, style);
 }
 
+- (bool)isDragging {
+    env.objc.borrow::<UIScrollViewHostObject>(this).is_dragging
+}
+
 - (())touchesMoved:(id)touches // NSSet* of UITouch*
          withEvent:(id)_event { // UIEvent*
     let scroll_enabled: bool = msg![env; this scrollEnabled];
@@ -151,6 +170,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     // Trigger rerender only if required.
     log_dbg!("content offset: old {:?}, new {:?}", offset, new_content_offset);
     if new_content_offset != offset {
+        env.objc.borrow_mut::<UIScrollViewHostObject>(this).is_dragging = true;
         () = msg![env; this setContentOffset:new_content_offset];
 
         let delegate: id = msg![env; this delegate];
@@ -162,6 +182,16 @@ pub const CLASSES: ClassExports = objc_classes! {
             () = msg![env; delegate scrollViewDidScroll:this];
         }
     }
+}
+
+- (())touchesEnded:(id)touches withEvent:(id)event {
+    env.objc.borrow_mut::<UIScrollViewHostObject>(this).is_dragging = false;
+    msg_super![env; this touchesEnded:touches withEvent:event]
+}
+
+- (())touchesCancelled:(id)touches withEvent:(id)event {
+    env.objc.borrow_mut::<UIScrollViewHostObject>(this).is_dragging = false;
+    msg_super![env; this touchesCancelled:touches withEvent:event]
 }
 
 @end

@@ -164,6 +164,28 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
     NSNotFound as NSUInteger
 }
+
+- (NSUInteger)indexOfObjectIdenticalTo:(id)object {
+    let count: NSUInteger = msg![env; this count];
+    for i in 0..count {
+        let curr_object: id = msg![env; this objectAtIndex:i];
+        if object == curr_object {
+            return i;
+        }
+    }
+    NSNotFound as NSUInteger
+}
+
+- (NSUInteger)indexOfObjectIdenticalTo:(id)object inRange:(NSRange)range {
+    for i in range.location..(range.location + range.length) {
+        let curr_object: id = msg![env; this objectAtIndex:i];
+        if object == curr_object {
+            return i;
+        }
+    }
+    NSNotFound as NSUInteger
+}
+
 - (bool)containsObject:(id)object {
     let idx: NSUInteger = msg![env; this indexOfObject:object];
     idx != NSNotFound as NSUInteger
@@ -246,6 +268,119 @@ pub const CLASSES: ClassExports = objc_classes! {
         }
     }
     true
+}
+
+- (())enumerateObjectsUsingBlock:(id)block {
+    if block == nil {
+        return;
+    }
+    let count: NSUInteger = msg![env; this count];
+    if count == 0 {
+        return;
+    }
+    let stop_ptr: MutPtr<u8> = env.mem.alloc_and_write(0u8);
+    let invoke_addr: u32 = env.mem.read(ConstPtr::<u32>::from_bits(block.to_bits() + 12));
+    let invoke = GuestFunction::from_addr_with_thumb_bit(invoke_addr);
+
+    for i in 0..count {
+        let stop: u8 = env.mem.read(stop_ptr);
+        if stop != 0 {
+            break;
+        }
+        let obj: id = msg![env; this objectAtIndex:i];
+        let (): () = invoke.call_from_host(env, (block, obj, i, stop_ptr));
+    }
+
+    env.mem.free(stop_ptr.cast());
+}
+
+- (())enumerateObjectsWithOptions:(NSUInteger)_opts
+                        usingBlock:(id)block {
+    () = msg![env; this enumerateObjectsUsingBlock:block];
+}
+
+- (id)initWithObjects:(ConstPtr<id>)_objects_ptr count:(NSUInteger)_count {
+    todo!("TODO: Implement [NSArray initWithObjects:count:] for custom subclasses")
+}
+
+- (id)arrayByAddingObjectsFromArray:(id)other_array { // NSArray*
+    let copy: id = msg![env; this mutableCopy];
+    if other_array != nil {
+        () = msg![env; copy addObjectsFromArray:other_array];
+    }
+    let res: id = msg![env; copy copy];
+    release(env, copy);
+    autorelease(env, res)
+}
+
+- (id)arrayByAddingObject:(id)an_object {
+    assert_ne!(an_object, nil, "arrayByAddingObject: object cannot be nil");
+    let copy: id = msg![env; this mutableCopy];
+    () = msg![env; copy addObject:an_object];
+    let res: id = msg![env; copy copy];
+    release(env, copy);
+    autorelease(env, res)
+}
+
+- (id)sortedArrayUsingSelector:(SEL)comparator {
+    let array: id = msg![env; this mutableCopy];
+    () = msg![env; array sortUsingSelector:comparator];
+    let array_imm: id = msg![env; array copy];
+    release(env, array);
+    autorelease(env, array_imm)
+}
+
+- (id)subarrayWithRange:(NSRange)range {
+    let count: NSUInteger = msg![env; this count];
+    let start = range.location;
+    let end = range.location.checked_add(range.length).expect("range overflow");
+    assert!(end <= count, "subarrayWithRange: range {:?} out of bounds for count {}", range, count);
+    let mut tmp = Vec::with_capacity(range.length as usize);
+    for i in start..end {
+        let obj: id = msg![env; this objectAtIndex:i];
+        retain(env, obj);
+        tmp.push(obj);
+    }
+    let res = from_vec(env, tmp);
+    autorelease(env, res)
+}
+
+- (())makeObjectsPerformSelector:(SEL)sel {
+    let count: NSUInteger = msg![env; this count];
+    let mut objects = Vec::with_capacity(count as usize);
+    for idx in 0..count {
+        let obj: id = msg![env; this objectAtIndex:idx];
+        if obj != nil {
+            retain(env, obj);
+            objects.push(obj);
+        }
+    }
+    for obj in objects {
+        let _: id = msg![env; obj performSelector:sel];
+        release(env, obj);
+    }
+}
+
+- (())makeObjectsPerformSelector:(SEL)sel withObject:(id)argument {
+    if argument != nil {
+        retain(env, argument);
+    }
+    let count: NSUInteger = msg![env; this count];
+    let mut objects = Vec::with_capacity(count as usize);
+    for idx in 0..count {
+        let obj: id = msg![env; this objectAtIndex:idx];
+        if obj != nil {
+            retain(env, obj);
+            objects.push(obj);
+        }
+    }
+    for obj in objects {
+        let _: id = msg![env; obj performSelector:sel withObject:argument];
+        release(env, obj);
+    }
+    if argument != nil {
+        release(env, argument);
+    }
 }
 
 @end
@@ -346,6 +481,27 @@ pub const CLASSES: ClassExports = objc_classes! {
     other
 }
 
+- (id)initWithObjects:(ConstPtr<id>)_objects_ptr count:(NSUInteger)_count {
+    todo!("TODO: Implement [NSMutableArray initWithObjects:count:] for custom subclasses")
+}
+
+- (())removeObjectsInRange:(NSRange)_range {
+    todo!("TODO: Implement [NSMutableArray removeObjectsInRange:] for custom subclasses")
+}
+
+- (())replaceObjectsInRange:(NSRange)range withObjectsFromArray:(id)other_array {
+    for _ in 0..range.length {
+        () = msg![env; this removeObjectAtIndex:(range.location)];
+    }
+    if other_array != nil {
+        let count: NSUInteger = msg![env; other_array count];
+        for i in 0..count {
+            let obj: id = msg![env; other_array objectAtIndex:i];
+            () = msg![env; this insertObject:obj atIndex:(range.location + i)];
+        }
+    }
+}
+
 @end
 
 // Our private subclass that is the single implementation of NSArray for the
@@ -368,6 +524,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (id)initWithArray:(id)array { // NSArray*
+    msg![env; this initWithArray:array copyItems:false]
+}
+
+- (id)initWithArray:(id)array copyItems:(bool)copy_items {
     let mut objects = Vec::new();
     let enumerator: id = msg![env; array objectEnumerator];
     loop {
@@ -375,8 +535,14 @@ pub const CLASSES: ClassExports = objc_classes! {
         if next == nil {
             break;
         }
-        objects.push(next);
-        retain(env, next);
+        let obj = if copy_items {
+            let copied: id = msg![env; next copy];
+            copied
+        } else {
+            retain(env, next);
+            next
+        };
+        objects.push(obj);
     }
     env.objc.borrow_mut::<ArrayHostObject>(this).array = objects;
     this
@@ -449,24 +615,6 @@ pub const CLASSES: ClassExports = objc_classes! {
     build_description(env, this)
 }
 
-- (id)subarrayWithRange:(NSRange)range {
-    let mut tmp = Vec::new();
-    tmp.extend_from_slice(
-        &env.objc.borrow::<ArrayHostObject>(this).array[range.location as usize..(range.location + range.length) as usize]
-    );
-    for &obj in &tmp {
-        retain(env, obj);
-    }
-    let res = from_vec(env, tmp);
-    autorelease(env, res)
-}
-
-- (id)sortedArrayUsingSelector:(SEL)comparator {
-    let new = msg![env; this mutableCopy];
-    () = msg![env; new sortUsingSelector:comparator];
-    autorelease(env, new)
-}
-
 @end
 
 // Special variant for use by CFArray with NULL callbacks: objects aren't
@@ -515,7 +663,22 @@ pub const CLASSES: ClassExports = objc_classes! {
     this
 }
 
+- (id)initWithObjects:(ConstPtr<id>)objects_ptr count:(NSUInteger)count {
+    let mut objects = Vec::new();
+    for i in 0..count {
+        let obj: id = env.mem.read(objects_ptr + i);
+        retain(env, obj);
+        objects.push(obj);
+    }
+    env.objc.borrow_mut::<ArrayHostObject>(this).array = objects;
+    this
+}
+
 - (id)initWithArray:(id)array { // NSArray*
+    msg![env; this initWithArray:array copyItems:false]
+}
+
+- (id)initWithArray:(id)array copyItems:(bool)copy_items {
     let mut objects = Vec::new();
     let enumerator: id = msg![env; array objectEnumerator];
     loop {
@@ -523,8 +686,14 @@ pub const CLASSES: ClassExports = objc_classes! {
         if next == nil {
             break;
         }
-        objects.push(next);
-        retain(env, next);
+        let obj = if copy_items {
+            let copied: id = msg![env; next copy];
+            copied
+        } else {
+            retain(env, next);
+            next
+        };
+        objects.push(obj);
     }
     env.objc.borrow_mut::<ArrayHostObject>(this).array = objects;
     this
@@ -563,14 +732,6 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 
     env.objc.dealloc_object(this, &mut env.mem)
-}
-
-- (())makeObjectsPerformSelector:(SEL)sel {
-    let count: NSUInteger = msg![env; this count];
-    for idx in 0..count {
-        let obj: id = msg![env; this objectAtIndex:idx];
-        let _: id = msg![env; obj performSelector:sel];
-    }
 }
 
 - (id)objectEnumerator { // NSEnumerator*
@@ -678,6 +839,31 @@ pub const CLASSES: ClassExports = objc_classes! {
     // TODO: runtime here is O(n^2), it could be O(n) instead
     for i in to_remove {
         () = msg![env; this removeObjectAtIndex:i];
+    }
+}
+
+- (())removeObjectIdenticalTo:(id)object {
+    let mut to_remove = Vec::new();
+    let count: NSUInteger = msg![env; this count];
+    for i in 0..count {
+        let curr_object: id = msg![env; this objectAtIndex:i];
+        if object == curr_object {
+            to_remove.push(i);
+        }
+    }
+    for i in to_remove.into_iter().rev() {
+        () = msg![env; this removeObjectAtIndex:i];
+    }
+}
+
+- (())removeObjectsInRange:(NSRange)range {
+    let host_obj = env.objc.borrow_mut::<ArrayHostObject>(this);
+    let start = range.location as usize;
+    let end = (range.location + range.length) as usize;
+    assert!(end <= host_obj.array.len());
+    let drained: Vec<id> = host_obj.array.drain(start..end).collect();
+    for obj in drained {
+        release(env, obj);
     }
 }
 
@@ -906,4 +1092,405 @@ fn init_with_objects_inner(env: &mut Environment, arr: id, first_obj: id, args: 
         objects.push(next_arg);
     }
     env.objc.borrow_mut::<ArrayHostObject>(arr).array = objects;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frameworks::core_graphics::{CGPoint, CGRect, CGSize};
+    use crate::objc::{id, msg, msg_class, nil, SEL};
+    use crate::Environment;
+
+    static TEST_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn get_test_environment() -> (std::sync::MutexGuard<'static, ()>, Environment) {
+        let guard = TEST_ENV_MUTEX.lock().unwrap();
+        let env = loop {
+            match Environment::new_for_test() {
+                Ok(env) => break env,
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        };
+        (guard, env)
+    }
+
+    #[test]
+    fn test_array_make_objects_perform_selector_with_uiview_subviews() {
+        let (_guard, mut env_inst) = get_test_environment();
+        let env = &mut env_inst;
+
+        // Matches MapleStory: -[ItemCell setItem:] at 0x91308:
+        // [self->enchantHistoryMarks makeObjectsPerformSelector:@selector(removeFromSuperview)];
+        let parent: id = msg_class![env; UIView alloc];
+        let parent: id = msg![env; parent initWithFrame:(CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { width: 100.0, height: 100.0 } })];
+
+        let child1: id = msg_class![env; UIView alloc];
+        let child1: id = msg![env; child1 initWithFrame:(CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { width: 10.0, height: 10.0 } })];
+
+        let child2: id = msg_class![env; UIView alloc];
+        let child2: id = msg![env; child2 initWithFrame:(CGRect { origin: CGPoint { x: 10.0, y: 0.0 }, size: CGSize { width: 10.0, height: 10.0 } })];
+
+        let child3: id = msg_class![env; UIView alloc];
+        let child3: id = msg![env; child3 initWithFrame:(CGRect { origin: CGPoint { x: 20.0, y: 0.0 }, size: CGSize { width: 10.0, height: 10.0 } })];
+
+        () = msg![env; parent addSubview:child1];
+        () = msg![env; parent addSubview:child2];
+        () = msg![env; parent addSubview:child3];
+
+        let subviews: id = msg![env; parent subviews];
+        let subviews_count: NSUInteger = msg![env; subviews count];
+        assert_eq!(subviews_count, 3);
+
+        // Immutable NSArray of marks (_touchHLE_NSArray created via [NSArray arrayWithArray:marks_mut])
+        let marks_mut: id = msg_class![env; NSMutableArray array];
+        () = msg![env; marks_mut addObject:child1];
+        () = msg![env; marks_mut addObject:child2];
+        let marks: id = msg_class![env; NSArray arrayWithArray:marks_mut];
+        let rem_sel: SEL = env.objc.register_host_selector("removeFromSuperview".to_string(), &mut env.mem);
+
+        () = msg![env; marks makeObjectsPerformSelector:rem_sel];
+
+        let child1_super: id = msg![env; child1 superview];
+        let child2_super: id = msg![env; child2 superview];
+        let child3_super: id = msg![env; child3 superview];
+        assert_eq!(child1_super, nil);
+        assert_eq!(child2_super, nil);
+        assert_eq!(child3_super, parent);
+
+        let remaining_subviews: id = msg![env; parent subviews];
+        let remaining_count: NSUInteger = msg![env; remaining_subviews count];
+        assert_eq!(remaining_count, 1);
+        let remaining_first: id = msg![env; remaining_subviews objectAtIndex:0u32];
+        assert_eq!(remaining_first, child3);
+
+        // Mutable NSMutableArray of marks (_touchHLE_NSMutableArray)
+        let mut_arr_marks: id = msg_class![env; NSMutableArray arrayWithObject:child3];
+        () = msg![env; mut_arr_marks makeObjectsPerformSelector:rem_sel];
+        let child3_super_after: id = msg![env; child3 superview];
+        assert_eq!(child3_super_after, nil);
+        let after_mut_subviews: id = msg![env; parent subviews];
+        let after_mut_count: NSUInteger = msg![env; after_mut_subviews count];
+        assert_eq!(after_mut_count, 0u32);
+    }
+
+    #[test]
+    fn test_array_make_objects_perform_selector_with_object() {
+        let (_guard, mut env_inst) = get_test_environment();
+        let env = &mut env_inst;
+
+        let inner1: id = msg_class![env; NSMutableArray array];
+        let inner2: id = msg_class![env; NSMutableArray array];
+
+        let outer_mut: id = msg_class![env; NSMutableArray array];
+        () = msg![env; outer_mut addObject:inner1];
+        () = msg![env; outer_mut addObject:inner2];
+        let outer_imm: id = msg_class![env; NSArray arrayWithArray:outer_mut];
+
+        let test_val: id = msg_class![env; NSNumber numberWithInt:42];
+        let add_sel: SEL = env.objc.register_host_selector("addObject:".to_string(), &mut env.mem);
+
+        // Test on immutable NSArray (_touchHLE_NSArray)
+        () = msg![env; outer_imm makeObjectsPerformSelector:add_sel withObject:test_val];
+        let inner1_count: NSUInteger = msg![env; inner1 count];
+        assert_eq!(inner1_count, 1u32);
+        let inner1_obj0: id = msg![env; inner1 objectAtIndex:0u32];
+        assert_eq!(inner1_obj0, test_val);
+        let inner2_count: NSUInteger = msg![env; inner2 count];
+        assert_eq!(inner2_count, 1u32);
+        let inner2_obj0: id = msg![env; inner2 objectAtIndex:0u32];
+        assert_eq!(inner2_obj0, test_val);
+
+        // Test on mutable NSMutableArray (_touchHLE_NSMutableArray)
+        let test_val2: id = msg_class![env; NSNumber numberWithInt:99];
+        () = msg![env; outer_mut makeObjectsPerformSelector:add_sel withObject:test_val2];
+        let inner1_count2: NSUInteger = msg![env; inner1 count];
+        assert_eq!(inner1_count2, 2u32);
+        let inner1_obj1: id = msg![env; inner1 objectAtIndex:1u32];
+        assert_eq!(inner1_obj1, test_val2);
+        let inner2_count2: NSUInteger = msg![env; inner2 count];
+        assert_eq!(inner2_count2, 2u32);
+        let inner2_obj1: id = msg![env; inner2 objectAtIndex:1u32];
+        assert_eq!(inner2_obj1, test_val2);
+    }
+
+    #[test]
+    fn test_set_make_objects_perform_selector() {
+        let (_guard, mut env_inst) = get_test_environment();
+        let env = &mut env_inst;
+
+        let n1: id = msg_class![env; NSNumber numberWithInt:1];
+        let n2: id = msg_class![env; NSNumber numberWithInt:2];
+        let s1: id = msg_class![env; NSMutableArray array];
+        () = msg![env; s1 addObject:n1];
+        let s2: id = msg_class![env; NSMutableArray array];
+        () = msg![env; s2 addObject:n2];
+        let add_sel: SEL = env.objc.register_host_selector("addObject:".to_string(), &mut env.mem);
+        let clear_sel: SEL = env.objc.register_host_selector("removeAllObjects".to_string(), &mut env.mem);
+        let val: id = msg_class![env; NSNumber numberWithInt:100];
+
+        let arr: id = msg_class![env; NSMutableArray array];
+        () = msg![env; arr addObject:s1];
+        () = msg![env; arr addObject:s2];
+
+        // 1. NSSet (_touchHLE_NSSet)
+        let set_imm: id = msg_class![env; NSSet setWithArray:arr];
+        () = msg![env; set_imm makeObjectsPerformSelector:add_sel withObject:val];
+        let s1_cnt: NSUInteger = msg![env; s1 count];
+        assert_eq!(s1_cnt, 2u32);
+        let s2_cnt: NSUInteger = msg![env; s2 count];
+        assert_eq!(s2_cnt, 2u32);
+        () = msg![env; set_imm makeObjectsPerformSelector:clear_sel];
+        let s1_cnt0: NSUInteger = msg![env; s1 count];
+        assert_eq!(s1_cnt0, 0u32);
+        let s2_cnt0: NSUInteger = msg![env; s2 count];
+        assert_eq!(s2_cnt0, 0u32);
+
+        // 2. NSMutableSet (_touchHLE_NSMutableSet)
+        let m1: id = msg_class![env; NSMutableArray array];
+        () = msg![env; m1 addObject:n1];
+        let m2: id = msg_class![env; NSMutableArray array];
+        () = msg![env; m2 addObject:n2];
+        let arr_m: id = msg_class![env; NSMutableArray array];
+        () = msg![env; arr_m addObject:m1];
+        () = msg![env; arr_m addObject:m2];
+        let mset: id = msg_class![env; NSMutableSet setWithArray:arr_m];
+        () = msg![env; mset makeObjectsPerformSelector:add_sel withObject:val];
+        let m1_cnt: NSUInteger = msg![env; m1 count];
+        assert_eq!(m1_cnt, 2u32);
+        let m2_cnt: NSUInteger = msg![env; m2 count];
+        assert_eq!(m2_cnt, 2u32);
+        () = msg![env; mset makeObjectsPerformSelector:clear_sel];
+        let m1_cnt0: NSUInteger = msg![env; m1 count];
+        assert_eq!(m1_cnt0, 0u32);
+        let m2_cnt0: NSUInteger = msg![env; m2 count];
+        assert_eq!(m2_cnt0, 0u32);
+
+        // 3. NSCountedSet (_touchHLE_NSCountedSet)
+        let c1: id = msg_class![env; NSMutableArray array];
+        () = msg![env; c1 addObject:n1];
+        let c2: id = msg_class![env; NSMutableArray array];
+        () = msg![env; c2 addObject:n2];
+        let cset: id = msg_class![env; NSCountedSet set];
+        () = msg![env; cset addObject:c1];
+        () = msg![env; cset addObject:c2];
+        () = msg![env; cset makeObjectsPerformSelector:add_sel withObject:val];
+        let c1_cnt: NSUInteger = msg![env; c1 count];
+        assert_eq!(c1_cnt, 2u32);
+        let c2_cnt: NSUInteger = msg![env; c2 count];
+        assert_eq!(c2_cnt, 2u32);
+        () = msg![env; cset makeObjectsPerformSelector:clear_sel];
+        let c1_cnt0: NSUInteger = msg![env; c1 count];
+        assert_eq!(c1_cnt0, 0u32);
+        let c2_cnt0: NSUInteger = msg![env; c2 count];
+        assert_eq!(c2_cnt0, 0u32);
+    }
+
+    #[test]
+    fn test_array_subarray_and_add_object_and_sort() {
+        let (_guard, mut env_inst) = get_test_environment();
+        let env = &mut env_inst;
+
+        let n1: id = msg_class![env; NSNumber numberWithInt:1];
+        let n2: id = msg_class![env; NSNumber numberWithInt:2];
+        let n3: id = msg_class![env; NSNumber numberWithInt:3];
+
+        let mut_arr: id = msg_class![env; NSMutableArray array];
+        () = msg![env; mut_arr addObject:n1];
+        () = msg![env; mut_arr addObject:n2];
+        () = msg![env; mut_arr addObject:n3];
+        let arr: id = msg_class![env; NSArray arrayWithArray:mut_arr];
+
+        // subarrayWithRange on NSArray
+        let sub: id = msg![env; arr subarrayWithRange:(NSRange { location: 1, length: 2 })];
+        let sub_cnt: NSUInteger = msg![env; sub count];
+        assert_eq!(sub_cnt, 2u32);
+        let sub_0: id = msg![env; sub objectAtIndex:0u32];
+        assert_eq!(sub_0, n2);
+        let sub_1: id = msg![env; sub objectAtIndex:1u32];
+        assert_eq!(sub_1, n3);
+
+        let sub_empty: id = msg![env; arr subarrayWithRange:(NSRange { location: 1, length: 0 })];
+        let sub_empty_cnt: NSUInteger = msg![env; sub_empty count];
+        assert_eq!(sub_empty_cnt, 0u32);
+
+        // subarrayWithRange on NSMutableArray
+        let sub_mut: id = msg![env; mut_arr subarrayWithRange:(NSRange { location: 0, length: 2 })];
+        let sub_mut_cnt: NSUInteger = msg![env; sub_mut count];
+        assert_eq!(sub_mut_cnt, 2u32);
+        let sub_mut_0: id = msg![env; sub_mut objectAtIndex:0u32];
+        assert_eq!(sub_mut_0, n1);
+        let sub_mut_1: id = msg![env; sub_mut objectAtIndex:1u32];
+        assert_eq!(sub_mut_1, n2);
+
+        // arrayByAddingObject on NSArray
+        let n4: id = msg_class![env; NSNumber numberWithInt:4];
+        let arr_added: id = msg![env; arr arrayByAddingObject:n4];
+        let arr_added_cnt: NSUInteger = msg![env; arr_added count];
+        assert_eq!(arr_added_cnt, 4u32);
+        let arr_added_3: id = msg![env; arr_added objectAtIndex:3u32];
+        assert_eq!(arr_added_3, n4);
+        let arr_cnt: NSUInteger = msg![env; arr count];
+        assert_eq!(arr_cnt, 3u32);
+
+        // arrayByAddingObject on NSMutableArray
+        let mut_added: id = msg![env; mut_arr arrayByAddingObject:n4];
+        let mut_added_cnt: NSUInteger = msg![env; mut_added count];
+        assert_eq!(mut_added_cnt, 4u32);
+        let mut_added_3: id = msg![env; mut_added objectAtIndex:3u32];
+        assert_eq!(mut_added_3, n4);
+        let mut_arr_cnt: NSUInteger = msg![env; mut_arr count];
+        assert_eq!(mut_arr_cnt, 3u32);
+
+        // arrayByAddingObjectsFromArray on NSArray and NSMutableArray
+        let extra_mut: id = msg_class![env; NSMutableArray array];
+        let n5: id = msg_class![env; NSNumber numberWithInt:5];
+        () = msg![env; extra_mut addObject:n5];
+        let arr_added_many: id = msg![env; arr arrayByAddingObjectsFromArray:extra_mut];
+        let arr_added_many_cnt: NSUInteger = msg![env; arr_added_many count];
+        assert_eq!(arr_added_many_cnt, 4u32);
+        let arr_added_many_3: id = msg![env; arr_added_many objectAtIndex:3u32];
+        assert_eq!(arr_added_many_3, n5);
+
+        let mut_added_many: id = msg![env; mut_arr arrayByAddingObjectsFromArray:extra_mut];
+        let mut_added_many_cnt: NSUInteger = msg![env; mut_added_many count];
+        assert_eq!(mut_added_many_cnt, 4u32);
+        let mut_added_many_3: id = msg![env; mut_added_many objectAtIndex:3u32];
+        assert_eq!(mut_added_many_3, n5);
+        // Ensure returning array is immutable _touchHLE_NSArray
+        let imm_class = env.objc.get_known_class("_touchHLE_NSArray", &mut env.mem);
+        let mut_added_class: Class = msg![env; mut_added_many class];
+        assert_eq!(mut_added_class, imm_class);
+
+        // sortedArrayUsingSelector on NSArray and NSMutableArray
+        let cmp_sel: SEL = env.objc.register_host_selector("compare:".to_string(), &mut env.mem);
+        let unsorted_mut: id = msg_class![env; NSMutableArray array];
+        () = msg![env; unsorted_mut addObject:n3];
+        () = msg![env; unsorted_mut addObject:n1];
+        () = msg![env; unsorted_mut addObject:n2];
+        let unsorted_arr: id = msg_class![env; NSArray arrayWithArray:unsorted_mut];
+
+        let sorted_arr: id = msg![env; unsorted_arr sortedArrayUsingSelector:cmp_sel];
+        let sorted_arr_cnt: NSUInteger = msg![env; sorted_arr count];
+        assert_eq!(sorted_arr_cnt, 3u32);
+        let sorted_arr_0: id = msg![env; sorted_arr objectAtIndex:0u32];
+        assert_eq!(sorted_arr_0, n1);
+        let sorted_arr_1: id = msg![env; sorted_arr objectAtIndex:1u32];
+        assert_eq!(sorted_arr_1, n2);
+        let sorted_arr_2: id = msg![env; sorted_arr objectAtIndex:2u32];
+        assert_eq!(sorted_arr_2, n3);
+
+        let sorted_mut: id = msg![env; unsorted_mut sortedArrayUsingSelector:cmp_sel];
+        let sorted_mut_cnt: NSUInteger = msg![env; sorted_mut count];
+        assert_eq!(sorted_mut_cnt, 3u32);
+        let sorted_mut_0: id = msg![env; sorted_mut objectAtIndex:0u32];
+        assert_eq!(sorted_mut_0, n1);
+        let sorted_mut_1: id = msg![env; sorted_mut objectAtIndex:1u32];
+        assert_eq!(sorted_mut_1, n2);
+        let sorted_mut_2: id = msg![env; sorted_mut objectAtIndex:2u32];
+        assert_eq!(sorted_mut_2, n3);
+    }
+
+    #[test]
+    fn test_dictionary_all_keys_for_object() {
+        let (_guard, mut env_inst) = get_test_environment();
+        let env = &mut env_inst;
+
+        let k1 = ns_string::from_rust_string(env, "k1".to_string());
+        let k2 = ns_string::from_rust_string(env, "k2".to_string());
+        let k3 = ns_string::from_rust_string(env, "k3".to_string());
+        let target_val = ns_string::from_rust_string(env, "target".to_string());
+        let other_val = ns_string::from_rust_string(env, "other".to_string());
+
+        // 1. Immutable NSDictionary
+        let dict_imm = super::super::ns_dictionary::dict_from_keys_and_objects(
+            env,
+            &[(k1, target_val), (k2, other_val), (k3, target_val)],
+        );
+
+        let matched_keys: id = msg![env; dict_imm allKeysForObject:target_val];
+        let matched_count: NSUInteger = msg![env; matched_keys count];
+        assert_eq!(matched_count, 2u32);
+        let has_k1: bool = msg![env; matched_keys containsObject:k1];
+        let has_k3: bool = msg![env; matched_keys containsObject:k3];
+        assert!(has_k1);
+        assert!(has_k3);
+
+        let non_existent = ns_string::from_rust_string(env, "nonexistent".to_string());
+        let unmatched_keys: id = msg![env; dict_imm allKeysForObject:non_existent];
+        let unmatched_count: NSUInteger = msg![env; unmatched_keys count];
+        assert_eq!(unmatched_count, 0u32);
+
+        // Passing nil to allKeysForObject returns empty array
+        let nil_keys: id = msg![env; dict_imm allKeysForObject:nil];
+        let nil_keys_cnt: NSUInteger = msg![env; nil_keys count];
+        assert_eq!(nil_keys_cnt, 0u32);
+
+        // 2. NSMutableDictionary
+        let dict_mut = super::super::ns_dictionary::mutable_dict_from_keys_and_objects(
+            env,
+            &[(k1, target_val), (k2, other_val), (k3, target_val)],
+        );
+        let mut_matched: id = msg![env; dict_mut allKeysForObject:target_val];
+        let mut_matched_count: NSUInteger = msg![env; mut_matched count];
+        assert_eq!(mut_matched_count, 2u32);
+        let mut_has_k1: bool = msg![env; mut_matched containsObject:k1];
+        let mut_has_k3: bool = msg![env; mut_matched containsObject:k3];
+        assert!(mut_has_k1);
+        assert!(mut_has_k3);
+
+        let mut_nil_keys: id = msg![env; dict_mut allKeysForObject:nil];
+        let mut_nil_keys_cnt: NSUInteger = msg![env; mut_nil_keys count];
+        assert_eq!(mut_nil_keys_cnt, 0u32);
+    }
+
+    #[test]
+    fn test_array_make_objects_perform_selector_mutation_safety() {
+        let (_guard, mut env_inst) = get_test_environment();
+        let env = &mut env_inst;
+
+        // Verify that if an element in the array mutates or clears the receiver array,
+        // snapshotting prevents index-out-of-bounds panics or iteration corruption.
+        let target_arr: id = msg_class![env; NSMutableArray array];
+        let clear_sel: SEL = env.objc.register_host_selector("removeAllObjects".to_string(), &mut env.mem);
+
+        // The array contains two references to target_arr
+        () = msg![env; target_arr addObject:target_arr];
+        () = msg![env; target_arr addObject:target_arr];
+        let target_arr_cnt: NSUInteger = msg![env; target_arr count];
+        assert_eq!(target_arr_cnt, 2u32);
+
+        // Performing removeAllObjects during makeObjectsPerformSelector:
+        // On iteration 0, target_arr removeAllObjects empties target_arr.
+        // On iteration 1, snapshotting retains target_arr, so iteration 1 runs safely without panic.
+        () = msg![env; target_arr makeObjectsPerformSelector:clear_sel];
+        let target_arr_cnt0: NSUInteger = msg![env; target_arr count];
+        assert_eq!(target_arr_cnt0, 0u32);
+    }
+
+    #[test]
+    fn test_set_all_objects_and_any_object() {
+        let (_guard, mut env_inst) = get_test_environment();
+        let env = &mut env_inst;
+
+        let n1: id = msg_class![env; NSNumber numberWithInt:10];
+        let n2: id = msg_class![env; NSNumber numberWithInt:20];
+
+        let arr: id = msg_class![env; NSMutableArray array];
+        () = msg![env; arr addObject:n1];
+        () = msg![env; arr addObject:n2];
+
+        let s: id = msg_class![env; NSSet setWithArray:arr];
+        let all: id = msg![env; s allObjects];
+        let all_cnt: NSUInteger = msg![env; all count];
+        assert_eq!(all_cnt, 2u32);
+        let any: id = msg![env; s anyObject];
+        assert!(any == n1 || any == n2);
+
+        let ms: id = msg_class![env; NSMutableSet setWithArray:arr];
+        let ms_all: id = msg![env; ms allObjects];
+        let ms_all_cnt: NSUInteger = msg![env; ms_all count];
+        assert_eq!(ms_all_cnt, 2u32);
+        let ms_any: id = msg![env; ms anyObject];
+        assert!(ms_any == n1 || ms_any == n2);
+    }
 }

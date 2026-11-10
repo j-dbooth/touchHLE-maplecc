@@ -16,8 +16,12 @@ use crate::mem::SafeRead;
 use crate::Environment;
 
 fn parse_tuple(s: &str) -> Result<(f32, f32), ()> {
-    let (a, b) = s.split_once(", ").ok_or(())?;
-    Ok((a.parse().map_err(|_| ())?, b.parse().map_err(|_| ())?))
+    let s = s.trim();
+    let (a, b) = s.split_once(',').ok_or(())?;
+    Ok((
+        a.trim().parse().map_err(|_| ())?,
+        b.trim().parse().map_err(|_| ())?,
+    ))
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
@@ -45,6 +49,7 @@ impl GuestArg for CGPoint {
 impl std::str::FromStr for CGPoint {
     type Err = ();
     fn from_str(s: &str) -> Result<CGPoint, ()> {
+        let s = s.trim();
         let s = s.strip_prefix('{').ok_or(())?.strip_suffix('}').ok_or(())?;
         let (x, y) = parse_tuple(s)?;
         Ok(CGPoint { x, y })
@@ -120,6 +125,7 @@ impl GuestArg for CGSize {
 impl std::str::FromStr for CGSize {
     type Err = ();
     fn from_str(s: &str) -> Result<CGSize, ()> {
+        let s = s.trim();
         let s = s.strip_prefix('{').ok_or(())?.strip_suffix('}').ok_or(())?;
         let (w, h) = parse_tuple(s)?;
         Ok(CGSize {
@@ -201,18 +207,21 @@ impl GuestArg for CGRect {
 impl std::str::FromStr for CGRect {
     type Err = ();
     fn from_str(s: &str) -> Result<CGRect, ()> {
+        let s = s.trim();
         let s = s
-            .strip_prefix("{{")
+            .strip_prefix('{')
             .ok_or(())?
-            .strip_suffix("}}")
-            .ok_or(())?;
-        let (a, b) = s.split_once("}, {").ok_or(())?;
-        let (x, y) = parse_tuple(a)?;
-        let (width, height) = parse_tuple(b)?;
-        Ok(CGRect {
-            origin: CGPoint { x, y },
-            size: CGSize { width, height },
-        })
+            .strip_suffix('}')
+            .ok_or(())?
+            .trim();
+        let first_close = s.find('}').ok_or(())?;
+        let a = &s[..=first_close];
+        let rest = s[first_close + 1..].trim();
+        let rest = rest.strip_prefix(',').ok_or(())?.trim();
+        let b = rest;
+        let origin: CGPoint = a.parse()?;
+        let size: CGSize = b.parse()?;
+        Ok(CGRect { origin, size })
     }
 }
 impl std::fmt::Display for CGRect {
@@ -447,3 +456,59 @@ pub const CONSTANTS: ConstantExports = &[
         HostConstant::Custom(|env| env.mem.alloc_and_write(CGRectNull).cast().cast_const()),
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_point_from_str() {
+        assert_eq!("{0,0}".parse::<CGPoint>(), Ok(CGPoint { x: 0.0, y: 0.0 }));
+        assert_eq!("{0, 0}".parse::<CGPoint>(), Ok(CGPoint { x: 0.0, y: 0.0 }));
+        assert_eq!(
+            " { 10.5 , -20.25 } ".parse::<CGPoint>(),
+            Ok(CGPoint { x: 10.5, y: -20.25 })
+        );
+        assert!("{0}".parse::<CGPoint>().is_err());
+        assert!("0, 0".parse::<CGPoint>().is_err());
+    }
+
+    #[test]
+    fn test_size_from_str() {
+        assert_eq!("{320,480}".parse::<CGSize>(), Ok(CGSize { width: 320.0, height: 480.0 }));
+        assert_eq!("{320, 480}".parse::<CGSize>(), Ok(CGSize { width: 320.0, height: 480.0 }));
+        assert_eq!(
+            " { 640.0 , 960.0 } ".parse::<CGSize>(),
+            Ok(CGSize { width: 640.0, height: 960.0 })
+        );
+        assert!("{320}".parse::<CGSize>().is_err());
+    }
+
+    #[test]
+    fn test_rect_from_str() {
+        assert_eq!(
+            "{{1,1},{320,480}}".parse::<CGRect>(),
+            Ok(CGRect {
+                origin: CGPoint { x: 1.0, y: 1.0 },
+                size: CGSize { width: 320.0, height: 480.0 },
+            })
+        );
+        assert_eq!(
+            "{{1, 1}, {320, 480}}".parse::<CGRect>(),
+            Ok(CGRect {
+                origin: CGPoint { x: 1.0, y: 1.0 },
+                size: CGSize { width: 320.0, height: 480.0 },
+            })
+        );
+        assert_eq!(
+            " {{ 417 , 329 } , { 69 , 32 }} ".parse::<CGRect>(),
+            Ok(CGRect {
+                origin: CGPoint { x: 417.0, y: 329.0 },
+                size: CGSize { width: 69.0, height: 32.0 },
+            })
+        );
+        assert!("{{0,0}}".parse::<CGRect>().is_err());
+        assert!("{0, 0}".parse::<CGRect>().is_err());
+    }
+}
+

@@ -242,6 +242,7 @@ pub struct Window {
     virtual_cursor_last: Option<(f32, f32, bool, bool)>,
     virtual_cursor_last_unsticky: Option<(f32, f32, Instant)>,
     virtual_accelerometer_last: Option<(f32, f32, bool)>,
+    last_mouse_coords: Option<Coords>,
     /// Whether or not we are on the "main" environment stack (rather than
     /// a coroutine stack). Checked in various functions to make sure that
     /// certain SDL functions (that call JNI functions) are on the main
@@ -397,6 +398,7 @@ impl Window {
             virtual_cursor_last: None,
             virtual_cursor_last_unsticky: None,
             virtual_accelerometer_last: None,
+            last_mouse_coords: None,
             on_main_stack: true,
         };
 
@@ -538,6 +540,25 @@ impl Window {
                 } => {
                     let (x, y) = transform_virt_accel_coords(self, (x, y));
                     self.virtual_accelerometer_last = Some((x, y, false));
+                }
+                _ => {}
+            }
+
+            match event {
+                E::MouseMotion { x, y, .. }
+                | E::MouseButtonDown { x, y, .. }
+                | E::MouseButtonUp { x, y, .. } => {
+                    self.last_mouse_coords = Some(transform_input_coords(self, (x as f32, y as f32), false));
+                }
+                E::MouseWheel { y, .. } if y != 0 => {
+                    if let Some(coords) = self.last_mouse_coords {
+                        let drag_amount = (y as f32) * 40.0;
+                        let moved_coords = (coords.0, coords.1 + drag_amount);
+                        self.event_queue.push_back(Event::TouchesDown(HashMap::from([(FingerId::Mouse, coords)])));
+                        self.event_queue.push_back(Event::TouchesMove(HashMap::from([(FingerId::Mouse, moved_coords)])));
+                        self.event_queue.push_back(Event::TouchesUp(HashMap::from([(FingerId::Mouse, moved_coords)])));
+                    }
+                    continue;
                 }
                 _ => {}
             }
@@ -1530,6 +1551,11 @@ pub fn get_battery_status() -> (i32, BatteryState) {
 }
 
 pub fn get_preferred_language_codes(env: &mut Environment) -> Vec<String> {
+    if env.window.is_none() {
+        return sdl2::locale::get_preferred_locales()
+            .map(|loc| loc.lang)
+            .collect();
+    }
     env.on_parent_stack_in_coroutine(|_, _| {
         sdl2::locale::get_preferred_locales()
             .map(|loc| loc.lang)
@@ -1538,9 +1564,15 @@ pub fn get_preferred_language_codes(env: &mut Environment) -> Vec<String> {
 }
 
 pub fn get_preferred_country_codes(env: &mut Environment) -> Vec<String> {
+    if env.window.is_none() {
+        return sdl2::locale::get_preferred_locales()
+            .filter_map(|loc| loc.country)
+            .collect();
+    }
     env.on_parent_stack_in_coroutine(|_, _| {
         sdl2::locale::get_preferred_locales()
             .filter_map(|loc| loc.country)
             .collect()
     })
 }
+

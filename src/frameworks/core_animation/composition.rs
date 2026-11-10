@@ -70,6 +70,33 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
         return None;
     }
 
+    let views = env.framework_state.uikit.ui_view.views.clone();
+    for view in views {
+        if !env.objc.is_object_alive(view) || !env.framework_state.uikit.ui_view.views.contains(&view) {
+            continue;
+        }
+        let needs_layout = env
+            .objc
+            .try_borrow::<crate::frameworks::uikit::ui_view::UIViewHostObject>(view)
+            .map(|h| h.needs_layout)
+            .unwrap_or(false);
+        if needs_layout {
+            let window: id = msg![env; view window];
+            if window != nil && env.objc.is_object_alive(window) {
+                let is_window_hidden: bool = msg![env; window isHidden];
+                if !is_window_hidden {
+                    if let Some(host) = env
+                        .objc
+                        .try_borrow_mut::<crate::frameworks::uikit::ui_view::UIViewHostObject>(view)
+                    {
+                        host.needs_layout = false;
+                    }
+                    let _: () = msg![env; view layoutSubviews];
+                }
+            }
+        }
+    }
+
     if find_fullscreen_eagl_layer(env) != nil {
         // No composition done, EAGLContext will present directly.
         log_dbg!("Using CAEAGLLayer fast path, skipping composition");
@@ -335,6 +362,7 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
                 root_layer,
                 cumulative_transform,
                 opacity,
+                None,
             );
         }
     }
@@ -410,6 +438,7 @@ unsafe fn composite_layer_recursive(
     layer: id,
     cumulative_transform: Matrix<4>,
     opacity: CGFloat,
+    current_scissor: Option<(i32, i32, i32, i32)>,
 ) {
     // TODO: this can't handle zPosition among other things, but it is not
     //       supported yet :)
@@ -632,17 +661,79 @@ unsafe fn composite_layer_recursive(
     }
     std::mem::drop(gles);
 
-    // avoid holding mutable borrow while recursing
-    let original_host_obj = env.objc.borrow_mut::<CALayerHostObject>(layer);
-    for &child_layer in &original_host_obj.sublayers.clone() {
-        // TODO: clipping/masksToBounds support
+    // avoid holding borrow while recursing
+    let (masks_to_bounds, sublayers) = {
+        let original_host_obj = env.objc.borrow::<CALayerHostObject>(layer);
+        (original_host_obj.masks_to_bounds, original_host_obj.sublayers.clone())
+    };
+
+    let next_scissor = if masks_to_bounds {
+        let bounds: CGRect = msg![env; layer bounds];
+        let rect_in_screen: CGRect = msg![env; layer convertRect:bounds toLayer:nil];
+        let screen_bounds: CGRect = {
+            let screen: id = msg_class![env; UIScreen mainScreen];
+            msg![env; screen bounds]
+        };
+        let scale_hack: u32 = env.options.scale_hack.get();
+
+        let mut gl_x = (rect_in_screen.origin.x * scale_hack as f32) as i32;
+        let mut gl_w = (rect_in_screen.size.width * scale_hack as f32) as i32;
+        let screen_h = screen_bounds.size.height;
+        let bottom_y = rect_in_screen.origin.y + rect_in_screen.size.height;
+        let mut gl_y = ((screen_h - bottom_y) * scale_hack as f32) as i32;
+        let mut gl_h = (rect_in_screen.size.height * scale_hack as f32) as i32;
+
+        if gl_w < 0 {
+            gl_w = 0;
+        }
+        if gl_h < 0 {
+            gl_h = 0;
+        }
+
+        if let Some((px, py, pw, ph)) = current_scissor {
+            let min_x = gl_x.max(px);
+            let max_x = (gl_x + gl_w).min(px + pw);
+            let min_y = gl_y.max(py);
+            let max_y = (gl_y + gl_h).min(py + ph);
+            gl_x = min_x;
+            gl_y = min_y;
+            gl_w = (max_x - min_x).max(0);
+            gl_h = (max_y - min_y).max(0);
+        }
+        Some((gl_x, gl_y, gl_w, gl_h))
+    } else {
+        current_scissor
+    };
+
+    if next_scissor != current_scissor {
+        if let Some((sx, sy, sw, sh)) = next_scissor {
+            let window = env.window.as_mut().unwrap();
+            let mut gles = window.make_internal_gl_ctx_current();
+            gles.Enable(gles11::SCISSOR_TEST);
+            gles.Scissor(sx, sy, sw, sh);
+        }
+    }
+
+    for &child_layer in &sublayers {
         composite_layer_recursive(
             env,
             animation_state,
             child_layer,
             cumulative_transform,
             opacity,
-        )
+            next_scissor,
+        );
+    }
+
+    if next_scissor != current_scissor {
+        let window = env.window.as_mut().unwrap();
+        let mut gles = window.make_internal_gl_ctx_current();
+        if let Some((px, py, pw, ph)) = current_scissor {
+            gles.Enable(gles11::SCISSOR_TEST);
+            gles.Scissor(px, py, pw, ph);
+        } else {
+            gles.Disable(gles11::SCISSOR_TEST);
+        }
     }
 }
 

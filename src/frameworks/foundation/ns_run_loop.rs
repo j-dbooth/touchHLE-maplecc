@@ -21,7 +21,7 @@ use crate::frameworks::{core_animation, media_player, uikit};
 use crate::libc::semaphore::{host_create_semaphore, sem_post, sem_t};
 use crate::mem::MutPtr;
 use crate::objc::{
-    id, msg, msg_send, nil, objc_classes, release, retain, Class, ClassExports, HostObject, SEL,
+    id, msg, nil, objc_classes, release, retain, Class, ClassExports, HostObject, SEL,
 };
 use crate::Environment;
 use std::collections::VecDeque;
@@ -294,6 +294,39 @@ pub(super) fn cancel_perform_requests(
         .selector_objects = new_selector_objects;
 }
 
+pub(super) fn cancel_all_perform_requests_for_target(
+    env: &mut Environment,
+    run_loop: id,
+    target: id,
+) {
+    log_dbg!(
+        "Removing all object selector requests for target {target:?} on run loop {run_loop:?}"
+    );
+    let mut new_selector_objects = VecDeque::new();
+    let host_object = env.objc.borrow_mut::<NSRunLoopHostObject>(run_loop);
+    let mut selector_objects = std::mem::take(&mut host_object.selector_objects);
+    while let Some(obj) = selector_objects.pop_front() {
+        if obj.target == target {
+            let ObjectSelectorSource {
+                target,
+                argument,
+                semaphore,
+                ..
+            } = obj;
+            release(env, target);
+            release(env, argument);
+            if !semaphore.is_null() {
+                sem_post(env, semaphore);
+            }
+        } else {
+            new_selector_objects.push_back(obj);
+        }
+    }
+    env.objc
+        .borrow_mut::<NSRunLoopHostObject>(run_loop)
+        .selector_objects = new_selector_objects;
+}
+
 /// Run the run loop for just a single iteration. This is a special mode just
 /// for the app picker, since we don't have `runMode:beforeDate:` yet.
 /// (TODO: implement those to replace this.)
@@ -416,10 +449,9 @@ pub fn run_run_loop(
                     log_dbg!("Running object selector request {target:?} {:?} {argument:?} on run loop {run_loop:?}", selector.as_str(env.mem.as_mut()));
 
                     if selector.as_str(&env.mem).ends_with(':') {
-                        () = msg_send(env, (target, selector, argument));
+                        () = crate::objc::msg_send_no_type_checking(env, (target, selector, argument));
                     } else {
-                        assert!(argument.is_null());
-                        () = msg_send(env, (target, selector));
+                        () = crate::objc::msg_send_no_type_checking(env, (target, selector));
                     }
 
                     release(env, target);

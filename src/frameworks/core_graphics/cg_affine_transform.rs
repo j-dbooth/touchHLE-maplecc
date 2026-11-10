@@ -60,12 +60,7 @@ impl TryFrom<Matrix<3>> for CGAffineTransform {
     type Error = ();
 
     fn try_from(value: Matrix<3>) -> Result<CGAffineTransform, ()> {
-        let columns = value.columns();
-        if columns[0][2] == 0.0 && columns[1][2] == 0.0 && columns[2][2] == 1.0 {
-            Ok(affine_transform_from_matrix_unchecked(value))
-        } else {
-            Err(())
-        }
+        Ok(affine_transform_from_matrix_unchecked(value))
     }
 }
 fn affine_transform_from_matrix_unchecked(matrix: Matrix<3>) -> CGAffineTransform {
@@ -97,6 +92,41 @@ impl From<CGAffineTransform> for Matrix<4> {
     }
 }
 
+impl std::str::FromStr for CGAffineTransform {
+    type Err = ();
+    fn from_str(s: &str) -> Result<CGAffineTransform, ()> {
+        let s = s.trim();
+        let s = s
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .or_else(|| s.strip_prefix('{').and_then(|s| s.strip_suffix('}')))
+            .ok_or(())?;
+        let parts: Vec<&str> = s.split(',').map(|p| p.trim()).collect();
+        if parts.len() != 6 {
+            return Err(());
+        }
+        Ok(CGAffineTransform {
+            a: parts[0].parse().map_err(|_| ())?,
+            b: parts[1].parse().map_err(|_| ())?,
+            c: parts[2].parse().map_err(|_| ())?,
+            d: parts[3].parse().map_err(|_| ())?,
+            tx: parts[4].parse().map_err(|_| ())?,
+            ty: parts[5].parse().map_err(|_| ())?,
+        })
+    }
+}
+
+impl std::fmt::Display for CGAffineTransform {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        let CGAffineTransform { a, b, c, d, tx, ty } = *self;
+        write!(
+            f,
+            "[{}, {}, {}, {}, {}, {}]",
+            a, b, c, d, tx, ty
+        )
+    }
+}
+
 #[rustfmt::skip]
 pub const CGAffineTransformIdentity: CGAffineTransform = CGAffineTransform {
     a: 1.0, c: 0.0, tx: 0.0,
@@ -123,22 +153,45 @@ impl CGAffineTransform {
         self == CGAffineTransformIdentity
     }
     pub fn make_rotation(angle: CGFloat) -> Self {
-        Matrix::<3>::from(&Matrix::<2>::z_rotation(angle))
-            .try_into()
-            .unwrap()
+        let (sin, cos) = angle.sin_cos();
+        CGAffineTransform {
+            a: cos,
+            b: sin,
+            c: -sin,
+            d: cos,
+            tx: 0.0,
+            ty: 0.0,
+        }
     }
     pub fn make_scale(x: CGFloat, y: CGFloat) -> Self {
-        Matrix::<3>::from(&Matrix::<2>::scale_2d(x, y))
-            .try_into()
-            .unwrap()
+        CGAffineTransform {
+            a: x,
+            b: 0.0,
+            c: 0.0,
+            d: y,
+            tx: 0.0,
+            ty: 0.0,
+        }
     }
     pub fn make_translation(x: CGFloat, y: CGFloat) -> Self {
-        Matrix::<3>::translate_2d(x, y).try_into().unwrap()
+        CGAffineTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            tx: x,
+            ty: y,
+        }
     }
     pub fn concat(self, other: Self) -> Self {
-        Matrix::<3>::multiply(&self.into(), &other.into())
-            .try_into()
-            .unwrap()
+        CGAffineTransform {
+            a: self.a * other.a + self.b * other.c,
+            b: self.a * other.b + self.b * other.d,
+            c: self.c * other.a + self.d * other.c,
+            d: self.c * other.b + self.d * other.d,
+            tx: self.tx * other.a + self.ty * other.c + other.tx,
+            ty: self.tx * other.b + self.ty * other.d + other.ty,
+        }
     }
     pub fn rotate(self, angle: CGFloat) -> Self {
         Self::make_rotation(angle).concat(self)
@@ -150,16 +203,18 @@ impl CGAffineTransform {
         Self::make_translation(x, y).concat(self)
     }
     pub fn invert(self) -> Self {
-        let self_3x3: Matrix<3> = self.into();
-        if let Some(inverse) = Matrix::<3>::from(&self_3x3).inverse() {
-            // Matrix inversion sometimes produces values in the last column
-            // that are slightly off due to accumulated floating-point error.
-            // The TryFrom check causes crashes in that case, and it is a waste
-            // of energy to begin with as the result of inverting an affine
-            // transformation matrix will also be affine.
-            affine_transform_from_matrix_unchecked(inverse)
-        } else {
-            self
+        let det = self.a * self.d - self.b * self.c;
+        if det == 0.0 || det.is_nan() {
+            return self;
+        }
+        let inv_det = 1.0 / det;
+        CGAffineTransform {
+            a: self.d * inv_det,
+            b: -self.b * inv_det,
+            c: -self.c * inv_det,
+            d: self.a * inv_det,
+            tx: (self.c * self.ty - self.d * self.tx) * inv_det,
+            ty: (self.b * self.tx - self.a * self.ty) * inv_det,
         }
     }
 
@@ -327,3 +382,76 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CGSizeApplyAffineTransform(_, _)),
     export_c_func!(CGRectApplyAffineTransform(_, _)),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_affine_identity_and_invert() {
+        let id = CGAffineTransformIdentity;
+        assert!(id.is_identity());
+        assert_eq!(id.invert(), id);
+
+        let t = CGAffineTransform::make_translation(10.0, 20.0);
+        let inv = t.invert();
+        let combined = t.concat(inv);
+        let CGAffineTransform { tx, ty, .. } = combined;
+        assert!(tx.abs() < 1e-5);
+        assert!(ty.abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_singular_invert_does_not_panic() {
+        let zero_scale = CGAffineTransform::make_scale(0.0, 0.0);
+        let res = zero_scale.invert();
+        assert_eq!(res, zero_scale);
+
+        let nan_matrix = CGAffineTransform {
+            a: f32::NAN,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
+        let res_nan = nan_matrix.invert();
+        let a = { res_nan.a };
+        assert!(a.is_nan());
+    }
+
+    #[test]
+    fn test_concat() {
+        let t1 = CGAffineTransform::make_translation(5.0, 10.0);
+        let t2 = CGAffineTransform::make_translation(15.0, 20.0);
+        let res = t1.concat(t2);
+        let CGAffineTransform { tx, ty, .. } = res;
+        assert_eq!(tx, 20.0);
+        assert_eq!(ty, 30.0);
+    }
+
+    #[test]
+    fn test_from_str_and_display() {
+        let s = "[1.5, 2.5, 3.5, 4.5, 5.5, 6.5]";
+        let t = CGAffineTransform::from_str(s).expect("parse valid bracketed transform");
+        let CGAffineTransform { a, b, c, d, tx, ty } = t;
+        assert_eq!(a, 1.5);
+        assert_eq!(b, 2.5);
+        assert_eq!(c, 3.5);
+        assert_eq!(d, 4.5);
+        assert_eq!(tx, 5.5);
+        assert_eq!(ty, 6.5);
+
+        let formatted = format!("{}", t);
+        assert_eq!(formatted, "[1.5, 2.5, 3.5, 4.5, 5.5, 6.5]");
+
+        let brace_str = "{1, 2, 3, 4, 5, 6}";
+        let t_brace = CGAffineTransform::from_str(brace_str).expect("parse valid braced transform");
+        let a_brace = { t_brace.a };
+        assert_eq!(a_brace, 1.0);
+
+        assert!(CGAffineTransform::from_str("invalid").is_err());
+        assert!(CGAffineTransform::from_str("[1, 2, 3]").is_err());
+    }
+}
