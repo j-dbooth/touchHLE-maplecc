@@ -12,8 +12,8 @@ A dedicated, enhanced preservation fork of **[touchHLE](https://touchhle.org/)**
 ## Gameplay Screenshots
 
 <p align="center">
-  <img src="docs/screenshots/town.png" width="22%" alt="Town Scene" />
-  <img src="docs/screenshots/dungeon.png" width="22%" alt="Dungeon Gameplay" />
+  <img src="docs/screenshots/town.png" width="22%" alt="Treetop Town" />
+  <img src="docs/screenshots/status.png" width="22%" alt="Character Status & Equipment" />
   <img src="docs/screenshots/cash_shop.png" width="22%" alt="Offline Meso Cash Shop" />
   <img src="docs/screenshots/enchant.png" width="22%" alt="Enchant Equipment Screen" />
 </p>
