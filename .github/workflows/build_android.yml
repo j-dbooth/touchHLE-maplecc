@@ -80,18 +80,28 @@ jobs:
 
     - if: ${{ steps.cache-android-ndk.outputs.cache-hit != 'true' }}
       name: Extract Android NDK
-      run: 7z -oandroid-ndk -snld x android-ndk-r25c-linux.zip
+      run: unzip -q android-ndk-r25c-linux.zip -d android-ndk
 
     - name: Link Android NDK
-      run: ln -s $PWD'/android-ndk/android-ndk-r25c' $ANDROID_SDK_ROOT'/ndk/25.2.9519653'
+      run: |
+        mkdir -p "$ANDROID_SDK_ROOT/ndk"
+        if [ ! -d "$ANDROID_SDK_ROOT/ndk/25.2.9519653" ]; then
+          ln -s "$PWD/android-ndk/android-ndk-r25c" "$ANDROID_SDK_ROOT/ndk/25.2.9519653"
+        fi
 
     - name: Generate local.properties file
       run: echo 'sdk.dir='$ANDROID_SDK_ROOT > android/local.properties
 
     - name: Build for Android
-      run: cd android && ../gradle/gradle-8.11.1/bin/gradle assembleRelease && mv app/build/outputs/apk/release/app-release.apk ../touchHLE_MapleCC.apk
+      run: |
+        chmod +x gradle/gradle-8.11.1/bin/gradle
+        cd android
+        ../gradle/gradle-8.11.1/bin/gradle assembleRelease --stacktrace
+        mv app/build/outputs/apk/release/app-release.apk ../touchHLE_MapleCC.apk
       env:
         ANDROID_NDK_ROOT: '/usr/local/lib/android/sdk/ndk/25.2.9519653'
+        ANDROID_NDK_HOME: '/usr/local/lib/android/sdk/ndk/25.2.9519653'
+        ANDROID_NDK: '/usr/local/lib/android/sdk/ndk/25.2.9519653'
         CMAKE: ${{ github.workspace }}/vendor/cmake/bin/cmake
 
     - name: Upload Android APK
