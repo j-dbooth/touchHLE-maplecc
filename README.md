@@ -1,147 +1,151 @@
-# touchHLE: high-level emulator for early iOS apps
+# MapleStory: Cave Crawlers — Preservation Runtime (touchHLE Fork)
 
-**touchHLE** is a high-level emulator for early iOS apps. It runs on modern desktop operating systems and Android, and is written in Rust.
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows%20%7C%20Android-blue.svg)](https://github.com/j-dbooth/touchHLE-maplecc/releases)
+[![Rust](https://img.shields.io/badge/Language-Rust-orange.svg)](https://www.rust-lang.org/)
+[![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
+[![Game: MapleStory Cave Crawlers](https://img.shields.io/badge/Game-MapleStory%3A%20Cave%20Crawlers-ff69b4.svg)](https://en.wikipedia.org/wiki/MapleStory)
 
-touchHLE's high-level emulation (HLE) approach differs from low-level emulation (LLE) in that it does not directly simulate the iPhone/iPod touch hardware. Instead of running iOS inside emulation, touchHLE _itself_ takes the place of iOS and provides its own implementations of the system frameworks (Foundation, UIKit, OpenGL ES, OpenAL, etc). The only code the [emulated CPU](https://github.com/merryhime/dynarmic) executes is the app binary and [a handful of libraries](touchHLE_dylibs/).
+A dedicated, enhanced preservation fork of **[touchHLE](https://touchhle.org/)** engineered specifically to run Nexon's 2011 iOS exclusive dungeon crawler **MapleStory: Cave Crawlers** (`com.nexonmobile.mscc`, v1.0.1) with 100% playable features on modern **Windows (10/11)** and **Android** devices.
 
-The goal of this project is to run games from the early days of iOS:
+---
 
-* Currently: iPhone, iPod touch and iPad apps for iPhone OS 2.x, iPhone OS 3.x, and iOS 4.0.x.
-* Longer term: high-DPI (“Retina Display”) support, newer iOS 4 versions, iOS 5.x, iOS 6.x.
-* [Never](https://github.com/touchHLE/touchHLE/issues/181#issuecomment-1777098259): 64-bit iOS.
+## Gameplay Screenshots
 
-**This does not mean that all apps for these OS versions work.** The vast majority of iOS 2.x, 3.x and 4.x apps do not currently work in touchHLE, and the ones that do work are generally games (support for other apps is not prioritized as it is more complex and less fun). Compatibility will improve gradually over time with contributions from various developers. The [touchHLE app compatibility database](https://appdb.touchhle.org/) tracks which apps work in touchHLE; it is a crowdsourced effort to which anyone can contribute. **We don't take requests, so please do not ask us to support your favourite game.**
+<p align="center">
+  <img src="docs/screenshots/town.png" width="22%" alt="Town Scene" />
+  <img src="docs/screenshots/dungeon.png" width="22%" alt="Dungeon Gameplay" />
+  <img src="docs/screenshots/cash_shop.png" width="22%" alt="Offline Meso Cash Shop" />
+  <img src="docs/screenshots/enchant.png" width="22%" alt="Enchant Equipment Screen" />
+</p>
 
-If you're curious about the history and motivation behind the project, you might want to read [the original announcement](https://hikari.noyu.me/blog/2023-02-06-touchhle-anouncement-thread-tech-games-me-and-passion-projects.html). For an introduction to some of the technical details, check out [_touchHLE in depth_](https://hikari.noyu.me/blog/2023-04-13-touchhle-in-depth-1-function-calls.html).
+---
 
-**Check out the website for downloads, FAQ, social media, and more:**<br>👉 <https://touchhle.org/> 👈
+## Why This Fork Exists
 
-## Important disclaimer
+*MapleStory: Cave Crawlers* was released in 2011 for iOS by Nexon Mobile and delisted over a decade ago. It represented a unique rogue-lite spin-off in the MapleStory franchise featuring real-time dungeon exploration, crafting, equipment enchanting, and multi-floor cave crawling.
 
-This project is not affiliated with or endorsed by Apple Inc in any way. iPhone, iOS, iPod, iPod touch and iPad are trademarks of Apple Inc in the United States and other countries.
+Until now, the game was unplayable on modern platforms:
+- Early iOS devices that could run it are long dead or obsolete.
+- Vanilla touchHLE failed with severe crashes, black screens, memory corruptions, and non-functional in-app purchases.
 
-Only use touchHLE to emulate software you have obtained legally.
+This fork provides **over 9,600 lines of fixes and new framework implementations** to make the game fully playable from start to finish.
 
-## Platform support
+---
 
-* Officially supported: x64 Windows, x64 macOS and AArch64 Android.
-  * These are the platforms with binary releases.
-  * If you're an Apple Silicon Mac user, the x64 build reportedly works in Rosetta.
-* Probably works, but you must build it yourself: AArch64 macOS, x64 Linux, AArch64 Linux.
-* Never?: other architectures.
+## Key Enhancements & Fixes in this Fork
 
-Input methods:
+### 🛒 1. Offline Meso Cash Shop (No Defunct Apple Servers Needed)
+- In the original game, inventory expanders, scrolls, and potions were locked behind Apple In-App Purchases (`StoreKit`).
+- We reimplemented the Cash Shop runtime: **all Cash Shop items now cost in-game Mesos** earned from dungeon crawling!
+- **90% Gold Ingot Discount**: Reduced high-tier ingot costs by 10x for balanced offline progression.
+- Asynchronous payment queue transaction emulation ensures purchase dialogs close cleanly without hanging.
 
-- For simulated touch input, there are four options:
-  - Mouse/trackpad input (tap/hold/drag by pressing the left mouse button)
-  - Virtual cursor using a game controller (move the cursor with the right analog stick, and tap/hold/drag by pressing the stick or the right shoulder button)
-  - Mapping of game controller buttons or the left analog stick to specific on-screen locations (see the descriptions of `--button-to-touch=`, `--dpad-to-touch=` and `--stick-to-touch=` in `OPTIONS_HELP.txt`)
-  - Real touch input, if you're on a device that has a touch screen
-- For simulated accelerometer input, there are three options:
-  - Tilt control simulation using the left analog stick of a game controller
-  - Tilt control simulation using a mouse (hold down the right mouse button)
-  - Real accelerometer input, if you are using a phone, tablet or some other device with a built-in accelerometer (TODO: support game controllers with accelerometers)
+### 🎨 2. OpenGL ES 1.1 on GL2 Translation Engine
+- Fixed missing vertex pointer stride calculations and texture coordinate normalization (`GL_TEXTURE_COORD_ARRAY`).
+- Dungeon floors, walls, monster sprites, and animated spell effects render cleanly at 60 FPS without tearing or missing textures.
 
-## Development status
+### 🧬 3. Modern Objective-C 2.0 Sliding Ivars
+- Early 32-bit iOS runtimes frequently suffer memory corruption when subclasses add fields to base classes.
+- Implemented Apple's non-fragile instance variable layout engine to dynamically recalculate ivar offsets at runtime, preventing memory overlap in custom game classes.
 
-This project has been in development since December 2022. This was originally [hikari\_no\_yume](https://hikari.noyu.me/)'s full-time passion project. Since its release in February 2023, a number of other volunteers have also [contributed in their free time](https://github.com/touchHLE/touchHLE/graphs/contributors), and this is no longer a single-person project. There's only been a handful of releases so far and no promises can be made about the future. Please be patient.
+### 🔨 4. Equipment Enchanting Animation Crash Fix
+- Implemented missing `UIImageView` animation properties (`animationRepeatCount`, `animationImages`, `startAnimating`, `stopAnimating`).
+- Enchanting weapons and armor at the town blacksmith now plays the full star-upgrade animation smoothly without crashing.
 
-In general, the supported functionality is defined by the supported apps: most contributors are interested in getting a particular game working, and contribute support for whichever missing features are needed for that game. Consequently, the completeness varies a lot between APIs, e.g. UIKit is easily the most hacky and incomplete of the large frameworks that have been implemented, because most games don't use very much of its functionality, whereas the OpenGL ES and OpenAL implementations are probably complete enough to cover a large number of early apps, because games make heavy use of these.
+### 💍 5. Accurate Accessory Stat Rolling (`NSScanner` Fix)
+- Resolved an integer tokenization bug where negative sign separators in option ranges (e.g. `AddEXP_1*1-10`) were swallowed.
+- Rings and necklaces in the Town merchant shop now accurately roll and display their bonus values (`EXP +10%`, `Damage +15`, `Evade +5%`, etc.) instead of `+0%`.
 
-# Usage
+---
 
-First obtain touchHLE, either a [binary release](https://github.com/touchHLE/touchHLE/releases) or by building it yourself (see the next section).
+## How to Play on Windows
 
-You'll then need an app that you can run. The [app compatibility database](https://appdb.touchhle.org/) is a good guide for which versions of which apps are known to work, but bear in mind that it may contain outdated or inaccurate information. Note that the app binary must be decrypted to be usable.
+### Quick Start (No Compilation Required)
 
-There's a few ways you can run an app in touchHLE.
+1. **Download the Portable Release**:
+   * Grab `MapleStory_Cave_Crawlers_Windows_Portable.zip` from [Releases](https://github.com/j-dbooth/touchHLE-maplecc/releases).
+   * Extract the `.zip` anywhere on your PC.
 
-## Special Android notes
+2. **Add Your Game File**:
+   * Obtain the unmodified `MapleStory_Cave_Crawlers_1.0.1.235.ipa` (available on retro preservation archives like the [Internet Archive](https://archive.org)).
+   * Simply **drag and drop your `.ipa` file onto `Install_Game.bat`** (or place the file inside the `touchHLE_apps/` folder).
 
-Windows, Mac and Linux users can skip this section.
+3. **Play**:
+   * Double-click **`Play_MapleCC.bat`** to start playing immediately!
+   * All save data and progress are stored locally within the folder.
 
-On Android, only the graphical user interface (app picker) is available. Therefore, you must put your “.ipa” files or “.app” bundles inside the “touchHLE\_apps” directory. Note that you can only do that once you have run touchHLE at least once.
+### Windows Controls
+| Action | Input |
+|---|---|
+| Tap / Interact | Left Mouse Click |
+| Drag / Scroll | Left Mouse Hold & Drag |
+| Accelerometer (Tilt) | Hold Right Mouse Button + Move Mouse |
+| Back / Pause | In-game back button / touch |
 
-File management can be tricky on Android due to [restrictions introduced by Google in newer Android versions](https://developer.android.com/about/versions/11/privacy/storage#scoped-storage). One of these methods may work:
+---
 
-* If you tap the “File manager” button in touchHLE, this should open some sort of file manager. You might also be able to find touchHLE in your device's file manager app (often called “Files”, or sometimes “Downloads”), alongside cloud storage services. There are some limitations on what kinds of operations are possible. The files in this location are stored on your device. Warning: on some devices, the “File manager” button _will_ open a file manager, but it will crash when actually doing file operations (this is probably a bug in Android, we have not been able to debug it). If this happens to you, clear that file manager from your recent apps list and try to navigate to your device's file manager app directly instead, rather than via the touchHLE UI.
-* If you have an older version of Android, you may be able to directly access touchHLE's files by browsing to `/sdcard/Android/data/org.touchhle.android/files/touchHLE_apps`. Note that the `/sdcard` directory is usually not on the SD card.
-* You may be able to use ADB. If you're unfamiliar with ADB, try using <https://yume-chan.github.io/ya-webadb/> (in Google Chrome or another browser with WebUSB) with your device connected over USB. touchHLE's files can be found in “sdcard” > “Android” > “data” > “org.touchhle.android” > “files” > “touchHLE\_apps”.
+## How to Play on Android
 
-## Graphical user interface
+Because *MapleStory: Cave Crawlers* was originally a touch-driven iOS title, playing it on an Android phone or tablet delivers the authentic native mobile experience!
 
-touchHLE has a built-in app picker. If you put your `.ipa` files and `.app` bundles in the `touchHLE_apps` directory, they will show up in the app picker when you run touchHLE.
+1. **Download & Install APK**:
+   * Download `touchHLE_MapleCC.apk` from the latest [Release](https://github.com/j-dbooth/touchHLE-maplecc/releases) or GitHub Actions build artifacts.
+   * Sideload / install the APK on your Android device (Android 5.0+ / 64-bit ARM AArch64).
 
-To configure the options, you can edit the `touchHLE_options.txt` file. To get a list of options, look in the `OPTIONS_HELP.txt` file.
+2. **Initialize Folders**:
+   * Launch touchHLE once on your device, then close it so it creates its directory structure.
 
-## Command-line user interface
+3. **Transfer Game Files**:
+   * Connect your phone to your PC or use an Android file manager (like *Files by Google* or *ZArchiver*).
+   * Place `MapleStory_Cave_Crawlers.ipa` (or extracted `MapleCC.app`) into:
+     ```text
+     /sdcard/Android/data/org.touchhle.android/files/touchHLE_apps/
+     ```
 
-**This section does not apply on Android.**
+4. **Launch**:
+   * Open touchHLE, tap **MapleStory: Cave Crawlers**, and enjoy native touchscreen controls!
 
-You can see the command-line usage by passing the `--help` flag.
+---
 
-If you're a Windows user and unfamiliar with the command line, these instructions may help you get started:
+## Building from Source
 
-1. Move the `.ipa` file or `.app` bundle to the same folder as `touchHLE.exe`.
-2. Hold the Shift key and right-click on the empty space in the folder window.
-3. Click “Open with PowerShell”.
-4. Type `.\touchHLE.exe "YourAppNameHere.ipa"` (or `.app` as appropriate) and press Enter. If you want to specify options, add a space after the app name (outside the quotes) and then type the options, separated by spaces.
+### Prerequisites
+- [Rust toolchain](https://www.rust-lang.org/) (stable)
+- CMake & Ninja (on PATH)
+- Git
 
-## Local multiplayer support
+### Build for Windows (x64)
+```powershell
+# Clone the repository
+git clone -b maplecc-support https://github.com/j-dbooth/touchHLE-maplecc.git
+cd touchHLE-maplecc
 
-touchHLE provides limited support for local multiplayer via Wi-Fi in some games. At the moment of writing it is supported in Asphalt 4 and N.O.V.A.
+# Build optimized release binary
+cargo build --release
 
-Real iOS devices could also join/host games!
+# The compiled binary will be at: target/release/touchHLE.exe
+```
 
-**Usage:**
-1. Install touchHLE on 2+ devices connected to the same Wi-Fi network.
-2. **Important:** Ensure touchHLE is whitelisted in your OS firewall/network settings.
-3. Enable "Network access" in Quick options or via `--allow-network-access`.
-4. Start/join multiplayer in the game.
+### Build for Android (AArch64 APK)
+```bash
+# Add Android target
+rustup target add aarch64-linux-android
+cargo install cargo-ndk@3.5.4
 
-**FAQs:**
-* **Tunneling over Internet/VPN:** Not officially supported, but might work.
-* **Bluetooth:** Not supported.
+# Set NDK path (version 25.2.9519653 / r25c recommended)
+export ANDROID_NDK_ROOT=/path/to/android-ndk
 
-**Known issues:**
-* On macOS you may need to launch touchHLE from terminal as otherwise OS will block network connections.
+# Build release APK via Gradle
+cd android
+./gradlew assembleRelease
+# Output APK: android/app/build/outputs/apk/release/app-release.apk
+```
 
-## Other stuff
+---
 
-Any data saved by the app (e.g. **saved games**) are stored in the `touchHLE_sandbox` folder.
+## Legality & Disclaimer
 
-If the emulator crashes almost immediately while running a **known-working** version of a game, please check whether you have any overlays turned on like the Steam overlay, Discord overlay, RivaTuner Statistics Server, etc. Sadly, as useful as these tools are, they work by injecting themselves into other apps or games and don't always clean up after themselves, so they can break touchHLE… it's not our fault. 😢 Currently only RivaTuner Statistics Server is known to be a problem. If you find another overlay that doesn't work, please tell us about it.
-
-# Building and contributing
-
-See the `CONTRIBUTING.md` file in the git repo if you want to contribute. If you just want build touchHLE, look at `dev-docs/building.md`.
-
-# License
-
-touchHLE © 2023–2026 touchHLE project contributors.
-
-The source code of touchHLE itself (not its dependencies) is licensed under the Mozilla Public License, version 2.0.
-
-Due to license compatibility concerns, binaries are under the GNU General Public License version 3 or later.
-
-For a best effort listing of all licenses of dependencies, build touchHLE and pass the `--copyright` flag when running it, or click the “Copyright info” button in the app picker.
-
-Please note that different licensing terms apply to the bundled dynamic libraries (in `touchHLE_dylibs/`) and fonts (in `touchHLE_fonts/`). Please consult the respective directories for more information.
-
-# Thanks
-
-We stand on the shoulders of giants. Thank you to:
-
-* Everyone who has contributed to the project or supported any of its contributors financially.
-* The authors of and contributors to the many libraries used by this project: [dynarmic](https://github.com/merryhime/dynarmic), [rust-macho](https://github.com/flier/rust-macho), [SDL](https://libsdl.org/), [rust-sdl2](https://github.com/Rust-SDL2/rust-sdl2), [stb\_image](https://github.com/nothings/stb), Imagination Technologies' [PVRTC decompressor](https://github.com/powervr-graphics/Native_SDK/blob/master/framework/PVRCore/texture/PVRTDecompress.cpp), [openal-soft](https://github.com/kcat/openal-soft), [hound](https://github.com/ruuda/hound), [Symphonia](https://github.com/pdeljanov/Symphonia), [RustType](https://gitlab.redox-os.org/redox-os/rusttype), [the Liberation fonts](https://github.com/liberationfonts/liberation-fonts), [the Noto CJK fonts](https://github.com/googlefonts/noto-cjk), [rust-plist](https://github.com/ebarnard/rust-plist), [nibarchive](https://github.com/michaelwright235/nibarchive), [quick-xml](https://github.com/tafia/quick-xml), [gl-rs](https://github.com/brendanzab/gl-rs), [cargo-license](https://github.com/onur/cargo-license), [cc-rs](https://github.com/rust-lang/cc-rs), [cmake-rs](https://github.com/rust-lang/cmake-rs), [cargo-ndk](https://github.com/bbqsrc/cargo-ndk), [cargo-ndk-android-gradle](https://github.com/willir/cargo-ndk-android-gradle), [md-5 and sha1](https://github.com/RustCrypto/hashes), [encoding_rs](https://github.com/hsivonen/encoding_rs), [corosensei](https://github.com/Amanieu/corosensei), [uuid](https://github.com/uuid-rs/uuid) and the Rust standard library.
-* The Skyline emulator project (RIP), for [writing the tedious boilerplate needed to replace file management on newer Android versions](https://github.com/skyline-emu/skyline/blob/dc20a615275f66bee20a4fd851ef0231daca4f14/app/src/main/java/emu/skyline/provider/DocumentsProvider.kt).
-* The [Rust project](https://www.rust-lang.org/) generally.
-* The various people out there who've documented the iOS platform, officially or otherwise. Much of this documentation is linked to within this codebase!
-* The iOS hacking/jailbreaking community.
-* The Free Software Foundation, for making libgcc and libstdc++ copyleft and therefore saving this project from ABI hell.
-* The National Security Agency of the United States of America, for [Ghidra](https://ghidra-sre.org/).
-* [GerritForge](http://www.gerritforge.com/) for providing free Gerrit hosting to the general public, including us.
-* The many contributors to [Gerrit](https://www.gerritcodereview.com/).
-* Many friends who took an interest in the project and gave suggestions and encouragement.
-* Developers of early iOS apps. What treasures you created!
-* Apple, and NeXT before them, for creating such fantastic platforms.
+- **Emulator Software**: This project is open-source software licensed under the **Mozilla Public License, v. 2.0** (`COPYING.txt`). It contains clean-room reverse engineered stubs and high-level framework implementations.
+- **No Copyrighted Assets Distributed**: This repository does **not** host, bundle, or distribute any proprietary game binaries, artwork, sound files, or intellectual property belonging to Nexon. Users must provide their own legally dumped or preserved copies of the original `.ipa`.
+- **Trademark Notice**: *MapleStory*, *MapleStory: Cave Crawlers*, and all associated logos, characters, and assets are trademarks and copyrights of **Nexon Co., Ltd. & Nexon Mobile**. This project is an unofficial non-profit historical software preservation effort.
+- **Upstream Project**: Built upon the foundational work of [touchHLE](https://touchhle.org/) created by [hikari\_no\_yume](https://hikari.noyu.me/) and community contributors.
