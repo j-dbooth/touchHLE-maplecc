@@ -17,17 +17,19 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
+import java.util.Enumeration;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
 
 /**
- * Dedicated launcher Activity for MapleStory: Cave Crawlers
+ * Dedicated standalone launcher Activity for MapleStory: Cave Crawlers.
  */
 public class MainActivity extends SDLActivity {
     private static final String TAG = "MapleCC";
     private static final String APP_BUNDLE_NAME = "MapleCC.app";
     private static final String APPS_DIR_NAME = "touchHLE_apps";
+    private static final String INSTALL_MARKER = ".installed";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -63,6 +65,7 @@ public class MainActivity extends SDLActivity {
 
     /**
      * Unpacks the bundled game assets to external storage if not already present.
+     * Uses fast direct APK ZIP extraction to prevent Android UI thread ANR timeouts.
      */
     private void setupGameBundle() {
         File extDir = getExternalFilesDir(null);
@@ -77,60 +80,115 @@ public class MainActivity extends SDLActivity {
         }
 
         File targetAppDir = new File(appsDir, APP_BUNDLE_NAME);
-        File marker = new File(targetAppDir, "Info.plist");
-        if (marker.exists()) {
-            Log.i(TAG, "MapleCC.app already installed at " + targetAppDir.getAbsolutePath());
+        File marker = new File(targetAppDir, INSTALL_MARKER);
+        File infoPlist = new File(targetAppDir, "Info.plist");
+
+        if (marker.exists() && infoPlist.exists()) {
+            Log.i(TAG, "MapleCC.app already installed and verified at " + targetAppDir.getAbsolutePath());
             return;
         }
 
-        AssetManager am = getAssets();
+        Log.i(TAG, "Preparing standalone game bundle...");
+        boolean success = false;
 
-        // 1. Try extracting bundled zip (MapleCC.zip or touchHLE_apps/MapleCC.zip)
-        String[] zipCandidates = new String[] {
-            "MapleCC.zip",
-            APPS_DIR_NAME + "/MapleCC.zip"
-        };
-        for (String zipPath : zipCandidates) {
-            try (InputStream is = am.open(zipPath)) {
-                Log.i(TAG, "Extracting bundled game archive: " + zipPath);
-                unzip(is, appsDir);
-                if (marker.exists()) {
-                    Log.i(TAG, "Successfully extracted " + APP_BUNDLE_NAME + " from " + zipPath);
-                    return;
-                }
-            } catch (IOException ignored) {
-                // Not present under this path
-            }
-        }
-
-        // 2. Try copying single IPA package if bundled
-        String[] ipaCandidates = new String[] {
-            APPS_DIR_NAME + "/MapleCC.ipa",
-            APPS_DIR_NAME + "/MapleStory_Cave_Crawlers_1.0.1.235.ipa",
-            "MapleCC.ipa"
-        };
-        for (String ipaPath : ipaCandidates) {
-            try (InputStream is = am.open(ipaPath)) {
-                File targetIpa = new File(appsDir, "MapleCC.ipa");
-                Log.i(TAG, "Copying bundled game IPA to " + targetIpa.getAbsolutePath());
-                copyStream(is, targetIpa);
-                return;
-            } catch (IOException ignored) {
-                // Not present under this path
-            }
-        }
-
-        // 3. Try copying loose files from assets directory (touchHLE_apps/MapleCC.app)
-        String assetAppPath = APPS_DIR_NAME + "/" + APP_BUNDLE_NAME;
+        // Method 1: High-speed direct streaming from APK zip package (~1-2 seconds)
+        // Bypasses recursive AssetManager.list() overhead that causes Android ANR freezes.
         try {
-            String[] list = am.list(assetAppPath);
-            if (list != null && list.length > 0) {
-                Log.i(TAG, "Copying loose bundled app directory from assets: " + assetAppPath);
-                copyAssetFolder(am, assetAppPath, targetAppDir);
-                Log.i(TAG, "Finished copying bundled app directory");
+            String apkPath = getApplicationInfo().sourceDir;
+            if (apkPath != null && new File(apkPath).exists()) {
+                Log.i(TAG, "Extracting bundled assets directly from APK: " + apkPath);
+                try (ZipFile apkZip = new ZipFile(apkPath)) {
+                    String prefix = "assets/" + APPS_DIR_NAME + "/" + APP_BUNDLE_NAME + "/";
+                    Enumeration<? extends ZipEntry> entries = apkZip.entries();
+                    byte[] buffer = new byte[65536];
+
+                    while (entries.hasMoreElements()) {
+                        ZipEntry entry = entries.nextElement();
+                        String entryName = entry.getName();
+                        if (entryName.startsWith(prefix)) {
+                            String relPath = entryName.substring(prefix.length());
+                            if (relPath.isEmpty()) continue;
+
+                            File outFile = new File(targetAppDir, relPath);
+                            if (entry.isDirectory()) {
+                                if (!outFile.isDirectory() && !outFile.mkdirs()) {
+                                    throw new IOException("Failed to create dir: " + outFile.getAbsolutePath());
+                                }
+                            } else {
+                                File parent = outFile.getParentFile();
+                                if (parent != null && !parent.exists() && !parent.mkdirs()) {
+                                    throw new IOException("Failed to create parent dir: " + parent.getAbsolutePath());
+                                }
+                                try (InputStream is = apkZip.getInputStream(entry);
+                                     FileOutputStream fos = new FileOutputStream(outFile)) {
+                                    int len;
+                                    while ((len = is.read(buffer)) > 0) {
+                                        fos.write(buffer, 0, len);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (infoPlist.exists()) {
+                        success = true;
+                        Log.i(TAG, "Direct APK asset extraction completed successfully!");
+                    }
+                }
             }
-        } catch (IOException e) {
-            Log.e(TAG, "Failed reading asset folder " + assetAppPath + ": " + e.getMessage());
+        } catch (Throwable t) {
+            Log.w(TAG, "Direct APK extraction failed, falling back to AssetManager: " + t.getMessage());
+        }
+
+        // Method 2: Try bundled archive (MapleCC.zip / MapleCC.ipa) if present
+        if (!success) {
+            AssetManager am = getAssets();
+            String[] zipCandidates = new String[] {
+                "MapleCC.zip",
+                APPS_DIR_NAME + "/MapleCC.zip"
+            };
+            for (String zipPath : zipCandidates) {
+                try (InputStream is = am.open(zipPath)) {
+                    Log.i(TAG, "Extracting bundled game archive: " + zipPath);
+                    unzip(is, appsDir);
+                    if (infoPlist.exists()) {
+                        success = true;
+                        break;
+                    }
+                } catch (IOException ignored) {}
+            }
+        }
+
+        // Method 3: Fallback loose asset copy via AssetManager
+        if (!success) {
+            AssetManager am = getAssets();
+            String assetAppPath = APPS_DIR_NAME + "/" + APP_BUNDLE_NAME;
+            try {
+                String[] list = am.list(assetAppPath);
+                if (list != null && list.length > 0) {
+                    Log.i(TAG, "Copying loose bundled assets via AssetManager: " + assetAppPath);
+                    copyAssetFolder(am, assetAppPath, targetAppDir);
+                    if (infoPlist.exists()) {
+                        success = true;
+                    }
+                }
+            } catch (IOException e) {
+                Log.e(TAG, "Failed reading asset folder: " + e.getMessage());
+            }
+        }
+
+        // Write completion marker file only after complete extraction
+        if (success && infoPlist.exists()) {
+            try {
+                if (!marker.exists()) {
+                    marker.createNewFile();
+                }
+                Log.i(TAG, "Standalone installation verified and marker created.");
+            } catch (IOException e) {
+                Log.w(TAG, "Could not write installation marker: " + e.getMessage());
+            }
+        } else {
+            Log.e(TAG, "Failed to verify complete installation of MapleCC.app");
         }
     }
 
@@ -140,7 +198,6 @@ public class MainActivity extends SDLActivity {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
                 String entryName = entry.getName();
-                // Strip optional leading root directory in archive if present
                 if (entryName.startsWith("Payload/")) {
                     entryName = entryName.substring("Payload/".length());
                 }
@@ -169,12 +226,10 @@ public class MainActivity extends SDLActivity {
     private void copyAssetFolder(AssetManager am, String srcPath, File dstDir) throws IOException {
         String[] files = am.list(srcPath);
         if (files == null || files.length == 0) {
-            // It's a file
             try (InputStream is = am.open(srcPath)) {
                 copyStream(is, dstDir);
             }
         } else {
-            // It's a directory
             if (!dstDir.exists() && !dstDir.mkdirs()) {
                 throw new IOException("Failed to create directory: " + dstDir.getAbsolutePath());
             }
