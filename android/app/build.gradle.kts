@@ -44,16 +44,12 @@ android {
         buildConfig = true
     }
     defaultConfig {
-        val branding = getTouchHLEBranding()
-        applicationId = "org.touchhle.android"
-        if (!branding.isEmpty()) {
-            applicationIdSuffix = branding.lowercase()
-        }
-        resValue("string", "app_name", join("touchHLE", " ", branding))
-        buildConfigField("String", "APP_NAME", "\"${join("touchHLE", " ", branding)}\"")
-        manifestPlaceholders["icon"] = join("@drawable/icon", "_", branding.lowercase())
-        buildConfigField("int", "APP_ICON", join("R.drawable.icon", "_", branding.lowercase()))
-        versionName = join(getTouchHLEVersionName(), " ", branding)
+        applicationId = "com.nexonmobile.mscc"
+        resValue("string", "app_name", "MapleStory: Cave Crawlers")
+        buildConfigField("String", "APP_NAME", "\"MapleStory: Cave Crawlers\"")
+        manifestPlaceholders["icon"] = "@drawable/icon"
+        buildConfigField("int", "APP_ICON", "R.drawable.icon")
+        versionName = "1.0.1"
 
         minSdk = 21 // first version with AArch64
         targetSdk = 31
@@ -122,6 +118,10 @@ android {
                 path("jni/Android.mk")
             }
         }
+    }
+
+    aaptOptions {
+        noCompress("macho", "dylib", "png", "caf", "mp3", "pvr", "plist")
     }
 
     lint {

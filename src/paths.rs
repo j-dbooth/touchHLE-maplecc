@@ -153,12 +153,7 @@ pub fn user_data_base_path() -> Cow<'static, Path> {
 pub fn url_for_opening_user_data_dir() -> Result<String, String> {
     if std::env::consts::OS == "android" {
         // See DocumentsProvider.kt, app/build.gradle and AndroidManifest.xml
-        let brand = crate::branding();
-        Ok(format!(
-            "content://org.touchhle.android{}{}.provider/root/root",
-            if brand.is_empty() { "" } else { "." },
-            brand.to_lowercase()
-        ))
+        Ok("content://com.nexonmobile.mscc.provider/root/root".to_string())
     } else {
         let path = user_data_base_path()
             .join(".")

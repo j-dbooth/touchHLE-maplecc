@@ -67,8 +67,8 @@ pub use touchHLE_version::*;
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "C" fn SDL_main(
-    _argc: std::ffi::c_int,
-    _argv: *const *const std::ffi::c_char,
+    argc: std::ffi::c_int,
+    argv: *const *const std::ffi::c_char,
 ) -> std::ffi::c_int {
     // Rust's default panic handler prints to stderr, but on Android that just
     // gets discarded, so we set a custom hook to make debugging easier.
@@ -87,8 +87,42 @@ pub extern "C" fn SDL_main(
         }
     }));
 
-    // Empty args: brings up app picker.
-    match main([String::new()].into_iter()) {
+    let mut args: Vec<String> = Vec::new();
+    if argc > 0 && !argv.is_null() {
+        for i in 0..argc {
+            let ptr = unsafe { *argv.add(i as usize) };
+            if !ptr.is_null() {
+                let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
+                    .to_string_lossy()
+                    .into_owned();
+                args.push(s);
+            }
+        }
+    }
+
+    if args.is_empty() {
+        args.push(String::new()); // dummy argv[0]
+    }
+
+    // Auto-detect and boot standalone MapleStory: Cave Crawlers if no bundle path was passed
+    if args.len() == 1 {
+        let base_path = paths::user_data_base_path();
+        let candidates = [
+            base_path.join(paths::APPS_DIR).join("MapleCC.app"),
+            base_path.join(paths::APPS_DIR).join("MapleCC.ipa"),
+            base_path.join(paths::APPS_DIR).join("MapleStory_Cave_Crawlers_1.0.1.235.ipa"),
+            base_path.join("MapleCC.app"),
+        ];
+        for candidate in candidates {
+            if candidate.exists() {
+                echo!("Auto-booting standalone MapleCC bundle: {}", candidate.display());
+                args.push(candidate.to_string_lossy().into_owned());
+                break;
+            }
+        }
+    }
+
+    match main(args.into_iter()) {
         Ok(_) => echo!("touchHLE finished"),
         Err(e) => echo!("touchHLE errored: {e:?}"),
     }

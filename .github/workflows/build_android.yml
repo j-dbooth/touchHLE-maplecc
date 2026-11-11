@@ -105,6 +105,15 @@ jobs:
         echo "ndk.dir=$ANDROID_NDK_ROOT" >> android/local.properties
         cat android/local.properties
 
+    - name: Stage Bundled Game Assets
+      run: |
+        mkdir -p android/app/src/main/assets/touchHLE_apps
+        if [ -d "touchHLE_apps/MapleCC.app" ] && [ ! -d "android/app/src/main/assets/touchHLE_apps/MapleCC.app" ]; then
+          cp -r touchHLE_apps/MapleCC.app android/app/src/main/assets/touchHLE_apps/
+        fi
+        echo "Assets staged:"
+        ls -la android/app/src/main/assets/touchHLE_apps/MapleCC.app || true
+
     - name: Build for Android
       run: |
         chmod +x gradle/gradle-8.11.1/bin/gradle

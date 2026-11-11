@@ -1,7 +1,9 @@
 /target
 /vendor/boost
 /touchHLE_sandbox
-/touchHLE_apps
+/touchHLE_apps/*
+!/touchHLE_apps/README.txt
+!/touchHLE_apps/MapleCC.app
 touchHLE_log.txt
 touchHLE_wallpaper.*
 
